@@ -87,9 +87,12 @@ A typical switch or router asks for a login password, then an `enable` password:
     | Send text | `terminal length 0` |
 
 When the device asks for the password, Muxus reads it from 1Password and types it.
-1Password asks you to approve Muxus the first time, and again after about ten minutes
-without use or when the app locks. Telnet and serial consoles log in the same
-way, with **Wait for** `Username:` and `Password:` steps in the login sequence.
+1Password asks you to approve Muxus the first time. On Windows, that approval covers later
+reads until about ten minutes pass without use or the app locks. On macOS and Linux,
+1Password ties an approval to a terminal session, and Muxus does not run in one, so it may
+ask more often; a [service account](#set-it-up) avoids the prompts. Telnet and serial
+consoles log in the same way, with **Wait for** `Username:` and `Password:` steps in the
+login sequence.
 
 <figure markdown="span">
   ![A host's login password read from 1Password](../assets/screenshots/1password-host-login.png#only-light){ .shadow }

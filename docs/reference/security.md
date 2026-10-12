@@ -154,7 +154,9 @@ step (typed into the session and not saved), and **Send secret…** reports why.
 shell as `op read --no-newline [--account <account>] <reference>`, after checking that the
 reference has the `op://vault/item/field` shape and that the account cannot read as a flag.
 The CLI and the 1Password app do the signing in: with app integration, 1Password asks the
-user to approve Muxus, and that approval lasts about ten minutes of inactivity. Muxus looks
+user to approve Muxus. On Windows an approval lasts about ten minutes of inactivity; on
+macOS and Linux 1Password ties it to a terminal session, which the backend does not have,
+so it may ask again for later reads. Muxus looks
 for `op` on `PATH` and in the installers' usual folders; a configured **CLI location** is run
 as it is, so it is trusted configuration, like a `ProxyCommand`.
 
