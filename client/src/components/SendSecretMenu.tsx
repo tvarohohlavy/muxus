@@ -150,9 +150,9 @@ export function SendSecretMenu() {
           <Typography variant="body2" noWrap sx={{ maxWidth: 260 }}>
             {secret.name}
           </Typography>
-          {secret.username ? (
+          {secret.username || secret.external ? (
             <Box component="span" sx={{ ml: 'auto', pl: 1.5, color: 'text.secondary', fontSize: 12 }}>
-              {secret.username}
+              {[secret.username, secret.external?.providerLabel].filter(Boolean).join(' · ')}
             </Box>
           ) : null}
         </MenuItem>

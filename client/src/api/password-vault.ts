@@ -1,4 +1,5 @@
 import type {
+  ExternalSecretInput,
   PasswordVaultStatus,
   PasswordVaultUnlockPolicy,
   SendVaultSecretRequest,
@@ -134,6 +135,29 @@ export function updateVaultSecret(
 ): Promise<VaultSecretSaveResult> {
   return apiFetch<VaultSecretSaveResult>(
     `/api/password-vault/secrets/${encodeURIComponent(id)}`,
+    {
+      method: 'PUT',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+/** Save where a password manager keeps a secret; needs no vault and no master password. */
+export function createExternalSecret(input: ExternalSecretInput): Promise<VaultSecretSaveResult> {
+  return apiFetch<VaultSecretSaveResult>('/api/password-vault/external-secrets', {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateExternalSecret(
+  id: string,
+  input: ExternalSecretInput,
+): Promise<VaultSecretSaveResult> {
+  return apiFetch<VaultSecretSaveResult>(
+    `/api/password-vault/external-secrets/${encodeURIComponent(id)}`,
     {
       method: 'PUT',
       headers: JSON_HEADERS,

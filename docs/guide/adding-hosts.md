@@ -61,6 +61,11 @@ Three modes, matching OpenSSH behaviour:
 
 **User certificates** can be added separately as `CertificateFile`, for CA-signed keys.
 
+**Login password** picks a [named secret](settings.md#passwords) that Muxus types when the
+server asks for a password. It comes before a password remembered for the host and before
+the folder's. When it is unavailable or refused, the next one is tried, and then you are
+asked. Only the secret's ID is kept, in the Muxus database and never in `ssh_config`.
+
 ## Connection route
 
 The route determines how the connection is dialled.

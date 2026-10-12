@@ -54,6 +54,7 @@ import { useUiStore } from '../../state/ui.js';
 import { HostColorPicker } from '../HostColorPicker.js';
 import { FolderPathField } from '../FolderPathField.js';
 import { LoginSequenceEditor } from '../LoginSequenceEditor.js';
+import { VaultSecretField } from '../VaultSecretField.js';
 import { folderIcon, FOLDER_ICONS } from './folder-icons.js';
 import {
   folderProblemMessage,
@@ -86,6 +87,7 @@ export function FolderDialog() {
   const [authUser, setAuthUser] = useState('');
   const [authPort, setAuthPort] = useState('');
   const [authKey, setAuthKey] = useState('');
+  const [authSecret, setAuthSecret] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [removePassword, setRemovePassword] = useState(false);
   const [masterPassword, setMasterPassword] = useState('');
@@ -131,6 +133,7 @@ export function FolderDialog() {
   const seedUser = settingsRecord?.auth.user ?? '';
   const seedPort = settingsRecord?.auth.port !== undefined ? String(settingsRecord.auth.port) : '';
   const seedKey = settingsRecord?.auth.identityFiles?.[0] ?? '';
+  const seedSecret = settingsRecord?.auth.passwordSecretId ?? '';
   // Compared as text: a refetch hands back an equal but new object.
   const seedSequence = JSON.stringify(settingsRecord?.loginSequence ?? null);
   useEffect(() => {
@@ -139,13 +142,14 @@ export function FolderDialog() {
     setAuthUser(editing ? seedUser : '');
     setAuthPort(editing ? seedPort : '');
     setAuthKey(editing ? seedKey : '');
+    setAuthSecret(editing ? seedSecret : '');
     setAuthPassword('');
     setRemovePassword(false);
     setMasterPassword('');
     setLoginSequence(
       loginSequenceDraft(editing ? ((JSON.parse(seedSequence) as LoginSequence | null) ?? undefined) : undefined),
     );
-  }, [state, seedUser, seedPort, seedKey, seedSequence]);
+  }, [state, seedUser, seedPort, seedKey, seedSecret, seedSequence]);
 
   const target = movingHosts
     ? normalizeGroupPath(parent)
@@ -191,6 +195,7 @@ export function FolderDialog() {
       // A folder key means "log in with exactly this key", like the host
       // editor's specific-key mode.
       ...(authKey.trim() ? { identityFiles: [authKey.trim()], identitiesOnly: true } : {}),
+      ...(authSecret ? { passwordSecretId: authSecret } : {}),
     };
     const password = authPassword
       ? authPassword
@@ -520,6 +525,13 @@ export function FolderDialog() {
                     },
                   }}
                   fullWidth
+                />
+                <VaultSecretField
+                  label="Password from a secret"
+                  value={authSecret}
+                  onChange={setAuthSecret}
+                  noneLabel="None"
+                  helperText="Typed before the shared password when a host logs in with a password."
                 />
                 {passwordNeedsMaster && (
                   <TextField

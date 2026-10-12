@@ -22,6 +22,7 @@ import KeyOutlinedIcon from '@mui/icons-material/KeyOutlined';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import VerifiedUserOutlinedIcon from '@mui/icons-material/VerifiedUserOutlined';
 import type { SshKeysResponse } from '@muxus/shared';
+import { VaultSecretField } from '../VaultSecretField.js';
 import type { HostDraft, IdentityAgentMode, StrictHostKeyCheckingMode } from './draft.js';
 
 /**
@@ -33,10 +34,13 @@ export function AuthSection({
   draft,
   set,
   keys,
+  loginPassword = true,
 }: {
   draft: HostDraft;
   set: (patch: Partial<HostDraft>) => void;
   keys: SshKeysResponse | undefined;
+  /** Offer the host's login-password secret; a tunnel's ad-hoc profile has nowhere to keep it. */
+  loginPassword?: boolean;
 }) {
   const [pending, setPending] = useState('');
   const [pendingCertificate, setPendingCertificate] = useState('');
@@ -223,6 +227,27 @@ export function AuthSection({
           </Typography>
         </Stack>
       )}
+
+      {loginPassword ? (
+        <>
+          <Divider />
+          <Stack spacing={1.5}>
+            <Box>
+              <Typography variant="subtitle2">Login password</Typography>
+              <Typography variant="caption" color="textSecondary">
+                When the server asks for a password, Muxus first types this secret. If it is
+                unavailable or refused, you are asked as usual.
+              </Typography>
+            </Box>
+            <VaultSecretField
+              label="Password"
+              value={draft.passwordSecretId}
+              onChange={(passwordSecretId) => set({ passwordSecretId })}
+              noneLabel="A saved password, the folder’s, or ask"
+            />
+          </Stack>
+        </>
+      ) : null}
 
       <Divider />
 

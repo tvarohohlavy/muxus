@@ -492,6 +492,42 @@ const MIGRATIONS = [
     name: 'management-hosts',
     run: addManagementHosts,
   },
+  {
+    // A named secret whose value stays in a password manager (a secret
+    // provider): its credential_refs row holds the name, this row only where
+    // the manager keeps the value. Provider settings, such as where its CLI
+    // is, sit in a row per provider.
+    version: 30,
+    name: 'external-secrets',
+    sql: `
+      CREATE TABLE external_secrets (
+        credential_ref_id TEXT PRIMARY KEY
+          REFERENCES credential_refs(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL CHECK(length(provider) BETWEEN 1 AND 64),
+        locator TEXT NOT NULL CHECK(length(locator) BETWEEN 1 AND 1024),
+        options_json TEXT CHECK(options_json IS NULL OR json_valid(options_json)),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      ) STRICT;
+
+      CREATE TABLE secret_provider_settings (
+        provider TEXT PRIMARY KEY CHECK(length(provider) BETWEEN 1 AND 64),
+        settings_json TEXT NOT NULL CHECK(json_valid(settings_json)),
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      ) STRICT;
+    `,
+  },
+  {
+    // The named secret an SSH host logs in with; NULL falls back to the
+    // saved password and the folder's.
+    version: 31,
+    name: 'host-password-secrets',
+    sql: `
+      ALTER TABLE connection_profiles
+        ADD COLUMN password_secret_id TEXT
+        CHECK(password_secret_id IS NULL OR length(password_secret_id) BETWEEN 1 AND 200);
+    `,
+  },
 ] as const;
 
 /** Kinds stored as Muxus-owned saved hosts (everything but OpenSSH metadata rows). */
@@ -687,6 +723,7 @@ export interface OpenSshMetadata {
   disableSftp?: boolean;
   consoleCompatibility?: boolean;
   loginSequence?: LoginSequence;
+  passwordSecretId?: string;
   lastConnectedAt?: string;
   connectCount: number;
 }
@@ -762,6 +799,28 @@ export interface EncryptedCredentialRecord extends EncryptedCredentialInput {
   id: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A named secret whose value lives in a password manager. */
+export interface ExternalSecretRecord {
+  id: string;
+  label?: string;
+  username?: string;
+  /** The secret provider's ID. */
+  provider: string;
+  /** Where the manager keeps the value, never the value. */
+  locator: string;
+  options: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalSecretRecordInput {
+  label: string;
+  username?: string;
+  provider: string;
+  locator: string;
+  options: Record<string, string>;
 }
 
 export interface WorkspaceRecord {
@@ -881,6 +940,7 @@ export class MuxusDatabase {
         profiles.disable_sftp,
         profiles.console_compatibility,
         profiles.login_sequence_json,
+        profiles.password_secret_id,
         profiles.last_connected_at,
         profiles.connect_count,
         groups.name AS group_name
@@ -993,6 +1053,7 @@ export class MuxusDatabase {
             disable_sftp = ?,
             console_compatibility = ?,
             login_sequence_json = ?,
+            password_secret_id = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `)
@@ -1035,6 +1096,9 @@ export class MuxusDatabase {
             ? 1
             : 0,
         loginSequenceColumn(patch.loginSequence, current.login_sequence_json),
+        patch.passwordSecretId === undefined
+          ? nullableString(current.password_secret_id)
+          : patch.passwordSecretId,
         String(current.id),
       );
     return metadataFromRow(this.metadataByAlias.get(alias)!);
@@ -1415,6 +1479,120 @@ export class MuxusDatabase {
     this.flushSensitivePages(true);
   }
 
+  listExternalSecrets(ref: { provider: string; service: string }): ExternalSecretRecord[] {
+    return this.db
+      .prepare(`
+        SELECT refs.id, refs.label, refs.username, refs.created_at, secrets.updated_at,
+               secrets.provider, secrets.locator, secrets.options_json
+        FROM credential_refs AS refs
+        JOIN external_secrets AS secrets ON secrets.credential_ref_id = refs.id
+        WHERE refs.provider = ? AND refs.service = ?
+        ORDER BY refs.label COLLATE NOCASE, refs.id
+      `)
+      .all(ref.provider, ref.service)
+      .map(externalSecretFromRow);
+  }
+
+  externalSecretById(
+    id: string,
+    ref: { provider: string; service: string },
+  ): ExternalSecretRecord | undefined {
+    const row = this.db
+      .prepare(`
+        SELECT refs.id, refs.label, refs.username, refs.created_at, secrets.updated_at,
+               secrets.provider, secrets.locator, secrets.options_json
+        FROM credential_refs AS refs
+        JOIN external_secrets AS secrets ON secrets.credential_ref_id = refs.id
+        WHERE refs.id = ? AND refs.provider = ? AND refs.service = ?
+      `)
+      .get(id, ref.provider, ref.service);
+    return row ? externalSecretFromRow(row) : undefined;
+  }
+
+  /** Add a named secret kept by a password manager: its name, and where the manager keeps it. */
+  createExternalSecret(
+    ref: { provider: string; service: string },
+    input: ExternalSecretRecordInput,
+  ): ExternalSecretRecord {
+    assertSecretFree(input.options, 'externalSecret.options');
+    this.db.exec('BEGIN IMMEDIATE');
+    let id: string;
+    try {
+      ({ id } = this.upsertCredentialRef({
+        provider: ref.provider,
+        service: ref.service,
+        account: nanoid(),
+        label: input.label,
+        username: input.username,
+      }));
+      this.db
+        .prepare(`
+          INSERT INTO external_secrets(credential_ref_id, provider, locator, options_json)
+          VALUES (?, ?, ?, ?)
+        `)
+        .run(id, input.provider, input.locator, optionsColumn(input.options));
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return this.externalSecretById(id, ref)!;
+  }
+
+  updateExternalSecret(
+    id: string,
+    ref: { provider: string; service: string },
+    input: ExternalSecretRecordInput,
+  ): ExternalSecretRecord | undefined {
+    if (!this.externalSecretById(id, ref)) return undefined;
+    assertSecretFree(input.options, 'externalSecret.options');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.updateCredentialRefDetails(id, ref.provider, {
+        label: input.label,
+        username: input.username,
+      });
+      this.db
+        .prepare(`
+          UPDATE external_secrets
+          SET provider = ?, locator = ?, options_json = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE credential_ref_id = ?
+        `)
+        .run(input.provider, input.locator, optionsColumn(input.options), id);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return this.externalSecretById(id, ref);
+  }
+
+  /** A secret provider's saved settings, such as where its CLI is; empty when none are set. */
+  secretProviderSettings(provider: string): Record<string, string> {
+    const row = this.db
+      .prepare('SELECT settings_json FROM secret_provider_settings WHERE provider = ?')
+      .get(provider);
+    return stringRecordFromJson(row?.settings_json);
+  }
+
+  /** Replace a provider's settings; an empty set removes its row. */
+  setSecretProviderSettings(provider: string, settings: Record<string, string>): void {
+    requireNonEmpty(provider, 'provider');
+    assertSecretFree(settings, 'secretProvider.settings');
+    if (Object.keys(settings).length === 0) {
+      this.db.prepare('DELETE FROM secret_provider_settings WHERE provider = ?').run(provider);
+      return;
+    }
+    this.db
+      .prepare(`
+        INSERT INTO secret_provider_settings(provider, settings_json) VALUES (?, ?)
+        ON CONFLICT(provider) DO UPDATE SET
+          settings_json = excluded.settings_json,
+          updated_at = CURRENT_TIMESTAMP
+      `)
+      .run(provider, JSON.stringify(settings));
+  }
+
   private flushSensitivePages(compact = false): void {
     if (this.filename === ':memory:') return;
     this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
@@ -1528,6 +1706,7 @@ export class MuxusDatabase {
             disable_sftp = ?,
             console_compatibility = ?,
             login_sequence_json = ?,
+            password_secret_id = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `)
@@ -1570,6 +1749,9 @@ export class MuxusDatabase {
             ? 1
             : 0,
         loginSequenceColumn(patch.loginSequence, current.login_sequence_json),
+        patch.passwordSecretId === undefined
+          ? nullableString(current.password_secret_id)
+          : patch.passwordSecretId,
         id,
       );
     return this.savedHostProfile(id)!;
@@ -2271,6 +2453,20 @@ export class MuxusDatabase {
     };
   }
 
+  /** The named secret an SSH host logs in with, for an OpenSSH alias or a Muxus-owned host. */
+  hostPasswordSecretId(host: { alias: string } | { profileId: string }): string | undefined {
+    const row =
+      'alias' in host
+        ? this.metadataByAlias.get(host.alias)
+        : this.db
+            .prepare(`
+              SELECT password_secret_id FROM connection_profiles
+              WHERE id = ? AND kind = 'ssh'
+            `)
+            .get(host.profileId);
+    return optionalString(row?.password_secret_id);
+  }
+
   /** Remove one settings row only — descendants keep their own settings. */
   removeFolderSettingsRow(id: string): void {
     this.db.prepare('DELETE FROM folder_settings WHERE id = ?').run(id);
@@ -2544,6 +2740,37 @@ function folderSettingsFromRow(row: SqlRow): FolderSettingsRow {
   };
 }
 
+function externalSecretFromRow(row: SqlRow): ExternalSecretRecord {
+  return {
+    id: String(row.id),
+    label: optionalString(row.label),
+    username: optionalString(row.username),
+    provider: String(row.provider),
+    locator: String(row.locator),
+    options: stringRecordFromJson(row.options_json),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function optionsColumn(options: Record<string, string>): string | null {
+  return Object.keys(options).length > 0 ? JSON.stringify(options) : null;
+}
+
+/** A stored JSON object of strings; anything else in it is dropped. */
+function stringRecordFromJson(value: unknown): Record<string, string> {
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    );
+  } catch {
+    return {};
+  }
+}
+
 function metadataFromRow(row: SqlRow): OpenSshMetadata {
   const alias = String(row.ssh_alias);
   const name = String(row.name);
@@ -2564,6 +2791,7 @@ function metadataFromRow(row: SqlRow): OpenSshMetadata {
     ...(Number(row.disable_sftp) === 1 ? { disableSftp: true } : {}),
     ...(Number(row.console_compatibility) === 1 ? { consoleCompatibility: true } : {}),
     loginSequence: loginSequenceFromJson(row.login_sequence_json),
+    passwordSecretId: optionalString(row.password_secret_id),
     lastConnectedAt: optionalString(row.last_connected_at),
     connectCount: Number(row.connect_count),
   };
@@ -2607,6 +2835,7 @@ function savedHostFromRow(row: SqlRow): SavedHostProfile {
       ...(Number(row.disable_sftp) === 1 ? { disableSftp: true } : {}),
       ...(Number(row.console_compatibility) === 1 ? { consoleCompatibility: true } : {}),
       loginSequence: loginSequenceFromJson(row.login_sequence_json),
+      passwordSecretId: optionalString(row.password_secret_id),
       lastConnectedAt: optionalString(row.last_connected_at),
       connectCount: Number(row.connect_count),
     },

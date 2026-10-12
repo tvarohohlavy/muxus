@@ -13,6 +13,8 @@ import {
 } from '@muxus/shared/ws-protocol';
 import { buildApp } from '../../../server/src/app.js';
 import { resolveConfig } from '../../../server/src/config.js';
+import { SecretProviderError } from '../../../server/src/secret-providers/provider.js';
+import { FakeSecretProvider } from './fake-secret-provider.js';
 
 const TOKEN = 'login-sequence-session-token';
 const MASTER = 'master-pass-12';
@@ -89,11 +91,13 @@ let built: Awaited<ReturnType<typeof buildApp>>;
 let base: string;
 let scratch: string;
 let device: Awaited<ReturnType<typeof startFakeConsole>>;
+let provider: FakeSecretProvider;
 const sockets: WebSocket[] = [];
 
 beforeEach(async () => {
   scratch = mkdtempSync(path.join(os.tmpdir(), 'muxus-login-sequence-'));
   vi.stubEnv('HOME', scratch);
+  provider = new FakeSecretProvider({ 'fake://network/core-sw1': SECRET });
   built = await buildApp(
     resolveConfig({
       token: TOKEN,
@@ -102,6 +106,7 @@ beforeEach(async () => {
       prettyLogs: false,
       staticRoot: '/path/that/does/not/exist',
     }),
+    { secretProviders: [provider] },
   );
   await built.app.listen({ host: '127.0.0.1', port: 0 });
   base = `127.0.0.1:${(built.app.server.address() as AddressInfo).port}`;
@@ -141,6 +146,16 @@ async function telnetHost(metadata: Record<string, unknown> = {}): Promise<Saved
   });
   await api('PATCH', `/api/profiles/${saved.body.id}/metadata`, { group: 'Network/Consoles', ...metadata });
   return saved.body;
+}
+
+/** A secret kept by the test's password manager; no vault needed. */
+async function createExternalSecret(locator: string): Promise<string> {
+  const created = await api<{ secret: { id: string } }>('POST', '/api/password-vault/external-secrets', {
+    provider: 'fakevault',
+    name: 'Console password',
+    locator,
+  });
+  return created.body.secret.id;
 }
 
 function loginSteps(secretId: string): LoginSequence {
@@ -370,6 +385,78 @@ describe('login sequences on a live session', () => {
         message: 'Step 6: the password vault stayed locked.',
       }),
     );
+    expect(session.messages.some((message) => message.op === 'exit')).toBe(false);
+  });
+
+  it('types a secret from a password manager, with no vault at all', async () => {
+    const secretId = await createExternalSecret('fake://network/core-sw1');
+    const host = await telnetHost({ loginSequence: loginSteps(secretId) });
+    const session = await connect(host);
+    await vi.waitFor(() => expect(session.sequence().at(-1)?.state).toBe('done'), { timeout: 10_000 });
+    expect(session.sequence().map((update) => update.detail)).toContain(
+      'Typing “Console password” from FakeVault and Enter',
+    );
+    await vi.waitFor(() => expect(session.output()).toContain('core-sw1>'));
+    expect(session.output()).not.toContain(SECRET);
+    expect(session.messages.some((message) => message.op === 'auth-prompt')).toBe(false);
+    const appLogs = await api('GET', '/api/logs');
+    expect(appLogs.raw).not.toContain(SECRET);
+  });
+
+  it('lets the password manager ask over the session’s own prompt', async () => {
+    provider.passphrase = 'open sesame';
+    const secretId = await createExternalSecret('fake://network/core-sw1');
+    const host = await telnetHost({ loginSequence: loginSteps(secretId) });
+    const session = await connect(host);
+    await vi.waitFor(
+      () => expect(session.messages.some((message) => message.op === 'auth-prompt')).toBe(true),
+      { timeout: 10_000 },
+    );
+    expect(session.messages.find((message) => message.op === 'auth-prompt')).toMatchObject({
+      name: 'Unlock FakeVault',
+      prompts: [{ prompt: 'Passphrase', echo: false }],
+    });
+    session.socket.send(JSON.stringify({ op: 'auth-response', answers: ['open sesame'] }));
+    await vi.waitFor(() => expect(session.sequence().at(-1)?.state).toBe('done'));
+    await vi.waitFor(() => expect(session.output()).toContain('core-sw1>'));
+  });
+
+  it('asks for the value when the password manager cannot provide it', async () => {
+    const secretId = await createExternalSecret('fake://network/gone');
+    const host = await telnetHost({ loginSequence: loginSteps(secretId) });
+    const session = await connect(host);
+    await vi.waitFor(
+      () => expect(session.messages.some((message) => message.op === 'auth-prompt')).toBe(true),
+      { timeout: 10_000 },
+    );
+    expect(session.messages.find((message) => message.op === 'auth-prompt')).toMatchObject({
+      name: 'FakeVault is unavailable',
+      purpose: 'authentication',
+      prompts: [{ prompt: 'Console password', echo: false }],
+      skipLabel: 'Stop login sequence',
+      instructions: expect.stringContaining('FakeVault has nothing at that path.'),
+    });
+    session.socket.send(JSON.stringify({ op: 'auth-response', answers: [SECRET] }));
+    await vi.waitFor(() => expect(session.sequence().at(-1)?.state).toBe('done'));
+    await vi.waitFor(() => expect(session.output()).toContain('core-sw1>'));
+    expect(session.output()).not.toContain(SECRET);
+  });
+
+  it('stops, and says why, when the user does not type it either', async () => {
+    provider.failure = new SecretProviderError('denied', 'FakeVault did not allow access.');
+    const secretId = await createExternalSecret('fake://network/core-sw1');
+    const host = await telnetHost({ loginSequence: loginSteps(secretId) });
+    const session = await connect(host);
+    await vi.waitFor(
+      () => expect(session.messages.some((message) => message.op === 'auth-prompt')).toBe(true),
+      { timeout: 10_000 },
+    );
+    session.socket.send(JSON.stringify({ op: 'auth-response', answers: [], skipped: true }));
+    await vi.waitFor(() => expect(session.sequence().at(-1)?.state).toBe('failed'));
+    expect(session.sequence().at(-1)).toMatchObject({
+      step: 6,
+      message: 'Step 6: FakeVault could not provide “Console password”. FakeVault did not allow access.',
+    });
     expect(session.messages.some((message) => message.op === 'exit')).toBe(false);
   });
 

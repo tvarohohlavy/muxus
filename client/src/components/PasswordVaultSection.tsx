@@ -28,6 +28,8 @@ import {
   type PasswordVaultSecret,
   type PasswordVaultStatus,
   type PasswordVaultUnlockPolicy,
+  type SecretProviderInfo,
+  type SecretProvidersResponse,
 } from '@muxus/shared';
 import {
   changeMasterPassword,
@@ -40,7 +42,8 @@ import {
   unlockPasswordVault,
   updateSavedPassword,
 } from '../api/password-vault.js';
-import { usePasswordVaultStatus } from '../api/password-vault-queries.js';
+import { usePasswordVaultStatus, useSecretProviders } from '../api/password-vault-queries.js';
+import { fetchSecretProviders, saveSecretProviderSettings } from '../api/secret-providers.js';
 import { confirmAction } from '../state/dialogs.js';
 import { usePrefsStore } from '../state/prefs.js';
 import { showErrorToast, showToast } from '../state/toast.js';
@@ -49,6 +52,7 @@ import { commandButtonsUsingSecret } from '../vault-secrets.js';
 import { fetchLoginSequenceOwners } from '../api/folder-settings.js';
 import { loginSequencesUsingSecret } from '../login-sequence.js';
 import { VaultSecretDialog } from './VaultSecretDialog.js';
+import { ExternalSecretDialog } from './ExternalSecretDialog.js';
 import {
   SettingRow,
   SettingsGroup,
@@ -71,9 +75,14 @@ export function PasswordVaultSection() {
   const rememberPasswordsByDefault = usePrefsStore((s) => s.rememberPasswordsByDefault);
   const commandButtons = usePrefsStore((s) => s.commandButtons);
   const setPrefs = usePrefsStore((s) => s.set);
+  const providers = useSecretProviders().data?.providers ?? [];
   const [dialogMode, setDialogMode] = useState<MasterDialogMode>();
   const [editing, setEditing] = useState<PasswordVaultCredential>();
-  const [secretDialog, setSecretDialog] = useState<{ secret?: PasswordVaultSecret }>();
+  const [secretDialog, setSecretDialog] = useState<{
+    secret?: PasswordVaultSecret;
+    /** The password manager that keeps the secret; absent for the vault. */
+    provider?: SecretProviderInfo;
+  }>();
   const [busy, setBusy] = useState(false);
 
   const acceptStatus = (next: PasswordVaultStatus) => {
@@ -110,10 +119,13 @@ export function PasswordVaultSection() {
           ? `${users.length === 1 ? 'A saved command still types' : `${users.length} saved commands still type`} it: ${quotedList(users.map(commandButtonLabel))}. ${users.length === 1 ? 'Its button' : 'Their buttons'} will show that the secret is missing.`
           : sequences.length
             ? ''
-            : 'The secret is removed from the password vault.',
+            : secret.external
+              ? 'Muxus forgets where to find it.'
+              : 'The secret is removed from the password vault.',
         sequences.length
           ? `The login sequence of ${quotedList(sequences)} types it too and will stop at that step.`
           : '',
+        secret.external ? `The item itself stays in ${secret.external.providerLabel}.` : '',
       ]
         .filter(Boolean)
         .join(' '),
@@ -131,13 +143,15 @@ export function PasswordVaultSection() {
   };
 
   const removeVault = async () => {
-    const secretIds = new Set(status?.secrets.map((secret) => secret.id));
+    const secretIds = new Set(
+      status?.secrets.filter((secret) => !secret.external).map((secret) => secret.id),
+    );
     const secretButtons = usePrefsStore
       .getState()
       .commandButtons.filter((button) => button.secretId && secretIds.has(button.secretId)).length;
     const confirmed = await confirmAction({
       title: 'Delete the password vault?',
-      description: `Every saved SSH password and secret will be securely removed from the active database. Muxus also removes the OS credential-store copy when that store is available. No master password is required, so deletion remains possible if it is forgotten. Existing backups or filesystem snapshots are not affected. Connection profiles and SSH keys are not affected.${
+      description: `Every saved SSH password and vault secret will be securely removed from the active database. Muxus also removes the OS credential-store copy when that store is available. No master password is required, so deletion remains possible if it is forgotten. Existing backups or filesystem snapshots are not affected. Connection profiles and SSH keys are not affected.${
         secretButtons
           ? ` ${secretButtons === 1 ? 'A saved command types' : `${secretButtons} saved commands type`} one of these secrets and will show it as missing.`
           : ''
@@ -247,7 +261,7 @@ export function PasswordVaultSection() {
             />
             <SettingRow
               label="Delete the vault"
-              description="Forgets every saved password and secret; hosts, keys and other settings stay. Needs no master password, so a forgotten one can still be removed."
+              description="Forgets every saved password and vault secret; hosts, keys and other settings stay. Needs no master password, so a forgotten one can still be removed."
               control={
                 <Button
                   variant="outlined"
@@ -263,14 +277,36 @@ export function PasswordVaultSection() {
         ) : null}
       </SettingsGroup>
 
-      {status.configured ? (
+      {providers.map((provider) => (
+        <SecretProviderGroup key={provider.descriptor.id} provider={provider} />
+      ))}
+
+      {status.configured || providers.length > 0 || status.secrets.length > 0 ? (
         <SettingsGroup
           title={status.secrets.length ? `Secrets · ${status.secrets.length}` : 'Secrets'}
-          description="Passwords and PINs that are not a login, such as enable or sudo passwords. A command button or Send secret… types one into the focused session without showing it, and it stays out of session history and log files."
+          description={`Passwords and PINs to type into sessions, such as enable or sudo passwords, kept in the vault${
+            providers.length
+              ? ` or in ${providers.map((provider) => provider.descriptor.label).join(' or ')}`
+              : ''
+          }. A command button, Send secret… or a login sequence types one without showing it, and it stays out of session history and log files. A host or folder can also log in with one.`}
           action={
-            <Button size="small" startIcon={<AddIcon />} onClick={() => setSecretDialog({})}>
-              Add secret
-            </Button>
+            <Stack direction="row" spacing={0.5}>
+              {status.configured ? (
+                <Button size="small" startIcon={<AddIcon />} onClick={() => setSecretDialog({})}>
+                  Add secret
+                </Button>
+              ) : null}
+              {providers.map((provider) => (
+                <Button
+                  key={provider.descriptor.id}
+                  size="small"
+                  startIcon={<AddIcon />}
+                  onClick={() => setSecretDialog({ provider })}
+                >
+                  Add from {provider.descriptor.label}
+                </Button>
+              ))}
+            </Stack>
           }
           flush
         >
@@ -285,6 +321,11 @@ export function PasswordVaultSection() {
           ) : (
             status.secrets.map((secret) => {
               const users = commandButtonsUsingSecret(commandButtons, secret.id).length;
+              const provider = secret.external
+                ? providers.find((candidate) => candidate.descriptor.id === secret.external?.provider)
+                : undefined;
+              // A secret from a password manager this build lacks can only be deleted.
+              const editable = !secret.external || provider !== undefined;
               return (
                 <Box
                   key={secret.id}
@@ -303,6 +344,9 @@ export function PasswordVaultSection() {
                     </Typography>
                     <Typography variant="caption" color="textSecondary" component="div" noWrap>
                       {[
+                        secret.external
+                          ? `${secret.external.providerLabel} ${secret.external.locator}`
+                          : undefined,
                         secret.username ? `User ${secret.username}` : undefined,
                         users ? `Used by ${users} command button${users === 1 ? '' : 's'}` : undefined,
                         `Updated ${new Date(secret.updatedAt).toLocaleString()}`,
@@ -312,15 +356,17 @@ export function PasswordVaultSection() {
                     </Typography>
                   </Box>
                   <Stack direction="row" spacing={0.25} sx={{ flexShrink: 0 }}>
-                    <Tooltip title="View or edit secret">
-                      <IconButton
-                        size="small"
-                        aria-label={`View or edit ${secret.name}`}
-                        onClick={() => setSecretDialog({ secret })}
-                      >
-                        <EditOutlinedIcon sx={{ fontSize: 18 }} />
-                      </IconButton>
-                    </Tooltip>
+                    {editable ? (
+                      <Tooltip title={secret.external ? 'Edit secret' : 'View or edit secret'}>
+                        <IconButton
+                          size="small"
+                          aria-label={`${secret.external ? 'Edit' : 'View or edit'} ${secret.name}`}
+                          onClick={() => setSecretDialog({ secret, provider })}
+                        >
+                          <EditOutlinedIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                      </Tooltip>
+                    ) : null}
                     <Tooltip title="Delete secret">
                       <IconButton
                         size="small"
@@ -433,7 +479,23 @@ export function PasswordVaultSection() {
         />
       ) : null}
 
-      {secretDialog ? (
+      {secretDialog?.provider ? (
+        <ExternalSecretDialog
+          provider={secretDialog.provider}
+          secret={secretDialog.secret}
+          onClose={() => setSecretDialog(undefined)}
+          onSaved={(result) => {
+            acceptStatus(result.status);
+            setSecretDialog(undefined);
+            showToast(
+              'success',
+              secretDialog.secret
+                ? `Updated “${result.secret.name}”.`
+                : `Saved “${result.secret.name}”.`,
+            );
+          }}
+        />
+      ) : secretDialog ? (
         <VaultSecretDialog
           secret={secretDialog.secret}
           onClose={() => setSecretDialog(undefined)}
@@ -467,6 +529,96 @@ export function PasswordVaultSection() {
 
 const DESCRIPTION =
   'An optional vault for SSH passwords and other secrets, protected by a master password. Saved values stay on this machine and are never part of a backup.';
+
+/**
+ * One password manager: whether Muxus can use it now, and its settings. The
+ * text comes from the provider, so every manager looks the same here.
+ */
+function SecretProviderGroup({ provider }: { provider: SecretProviderInfo }) {
+  const queryClient = useQueryClient();
+  const { descriptor, settings, status } = provider;
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const replace = (next: SecretProviderInfo) =>
+    queryClient.setQueryData<SecretProvidersResponse>(['secret-providers'], (current) => ({
+      providers: (current?.providers ?? [next]).map((candidate) =>
+        candidate.descriptor.id === next.descriptor.id ? next : candidate,
+      ),
+    }));
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await action();
+    } catch (error) {
+      showErrorToast(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const checkAgain = () =>
+    run(async () => {
+      queryClient.setQueryData(['secret-providers'], await fetchSecretProviders(true));
+    });
+
+  const saveSetting = (key: string, value: string) =>
+    run(async () => {
+      replace(await saveSecretProviderSettings(descriptor.id, { [key]: value.trim() || null }));
+      setDrafts((current) => Object.fromEntries(Object.entries(current).filter(([draftKey]) => draftKey !== key)));
+    });
+
+  const state: { tone: StatusTone; text: string } = status.available
+    ? { tone: 'success', text: status.summary }
+    : {
+        tone: 'warning',
+        text: `${status.summary} Logins that need a ${descriptor.label} secret ask you to type it instead.`,
+      };
+
+  return (
+    <SettingsGroup title={descriptor.label} description={descriptor.description}>
+      <SettingRow
+        label="Status"
+        description={<StatusText tone={state.tone}>{state.text}</StatusText>}
+        control={
+          <Button variant="outlined" disabled={busy} onClick={() => void checkAgain()}>
+            Check again
+          </Button>
+        }
+      />
+      {descriptor.settings.map((field) => {
+        const id = `settings-${descriptor.id}-${field.key}`;
+        const saved = settings[field.key] ?? '';
+        const shown = drafts[field.key] ?? saved;
+        return (
+          <SettingRow key={field.key} label={field.label} labelFor={id} description={field.help} stacked>
+            <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+              <TextField
+                id={id}
+                size="small"
+                fullWidth
+                placeholder={status.detected?.[field.key] ?? field.placeholder}
+                value={shown}
+                onChange={(event) =>
+                  setDrafts((current) => ({ ...current, [field.key]: event.target.value }))
+                }
+                slotProps={{ htmlInput: { spellCheck: false } }}
+              />
+              <Button
+                variant="outlined"
+                disabled={busy || shown.trim() === saved}
+                onClick={() => void saveSetting(field.key, shown)}
+              >
+                Save
+              </Button>
+            </Stack>
+          </SettingRow>
+        );
+      })}
+    </SettingsGroup>
+  );
+}
 
 /** “a”, “a” and “b”, or “a”, “b” and 2 more. */
 function quotedList(labels: readonly string[]): string {

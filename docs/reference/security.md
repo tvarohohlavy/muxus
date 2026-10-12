@@ -130,6 +130,33 @@ Patterns are matched in the backend against a bounded window of output, and a re
 expression is abandoned after a short time limit, so a pathological pattern cannot stall
 other sessions.
 
+### Secrets from password managers
+
+A named secret can stay in a password manager that Muxus supports (a secret provider).
+Muxus stores its name, optional user name, the provider's ID and a locator that says where
+the manager keeps the value, plus optional per-secret options such as an account. It never
+stores the value. These rows live outside the vault: resetting the vault keeps them, and
+they are not part of a backup. Locators, options and provider settings are checked by the
+provider before they are saved or used, may not contain control characters, and pass the
+same secret-free check as everything else in the database.
+
+At each use the backend asks the provider for the value and types it straight into the
+session, exactly like a vault secret. The manager may ask the user to approve; reads for one
+provider run one at a time, so several sessions opening together can share one approval. A
+provider may also ask the user a question, such as a passphrase, in the session's own
+prompt; the answer is not saved.
+
+When a provider cannot give a value, nothing is typed: an SSH login moves on to the next
+saved password or the prompt, a login sequence asks the user to type the value for that
+step (typed into the session and not saved), and **Send secret…** reports why.
+
+### Login passwords from named secrets
+
+A host or folder can name a secret, from the vault or a password manager, to log in with.
+Only the secret's ID is stored, in the Muxus database and never in `ssh_config`. At login
+the order is: the host's secret, the host's saved password, then each folder from nearest
+to farthest, its secret before its saved password. A secret that was deleted is skipped.
+
 ## Host keys
 
 Verification uses `~/.ssh/known_hosts` and the read-only `/etc/ssh/ssh_known_hosts`, hashed

@@ -1,3 +1,4 @@
+import type { AuthPromptInfo, AuthPromptResponse } from '@muxus/shared';
 import type { TerminalInputWriter } from '../ws/terminal-inputs.js';
 import type { PasswordVault } from './password-vault.js';
 
@@ -7,12 +8,13 @@ export function secretKeystrokes(value: string, enter: boolean): Buffer {
 }
 
 /**
- * Type a named vault secret into terminal sessions as if it were typed. The
- * value goes from the vault straight to each writer; it is never returned,
- * logged or given to a session recorder, so only what the remote side echoes
- * can reach session history or a log file. The vault's own errors (locked,
- * wrong master password) pass through so callers can ask for the master
- * password and try again.
+ * Type a named secret into terminal sessions as if it were typed. The value
+ * goes from the vault (or the password manager holding it) straight to each
+ * writer; it is never returned, logged or given to a session recorder, so
+ * only what the remote side echoes can reach session history or a log file.
+ * The vault's own errors (locked, wrong master password) and the manager's
+ * pass through so callers can ask for the master password and try again, or
+ * explain.
  *
  * Resolves to the number of sessions that took the secret, or undefined when
  * the secret is no longer in the vault.
@@ -21,13 +23,30 @@ export async function typeVaultSecret(
   vault: PasswordVault,
   secretId: string,
   writers: readonly TerminalInputWriter[],
-  options: { enter: boolean; masterPassword?: string },
+  options: {
+    enter: boolean;
+    masterPassword?: string;
+    signal?: AbortSignal;
+    ask?: (prompt: AuthPromptInfo) => Promise<AuthPromptResponse>;
+  },
 ): Promise<number | undefined> {
-  const value = await vault.secretValue(secretId, options.masterPassword);
+  const value = await vault.secretValue(secretId, options.masterPassword, {
+    signal: options.signal,
+    ask: options.ask,
+  });
   if (value === undefined) return undefined;
+  return typeSecretValue(value, writers, options.enter);
+}
+
+/** Type a value straight into sessions, past every recorder; resolves to how many took it. */
+export function typeSecretValue(
+  value: string,
+  writers: readonly TerminalInputWriter[],
+  enter: boolean,
+): number {
   let typed = 0;
   for (const write of writers) {
-    if (write(secretKeystrokes(value, options.enter))) typed++;
+    if (write(secretKeystrokes(value, enter))) typed++;
   }
   return typed;
 }

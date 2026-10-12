@@ -230,13 +230,18 @@ the operating-system credential store.
   **Never for saved credentials** stores the vault key in the OS credential store,
   **When Muxus starts** unlocks it into memory once, and **Whenever a saved credential is
   needed** prompts for each use.
-- **Secrets** are passwords and PINs that are not a login, such as an `enable` or `sudo`
-  password; a user name is optional. **Add secret** saves one, and
-  [command buttons](commands.md#buttons-that-send-a-secret), **Send secret…** and
-  [login sequences](adding-hosts.md#login-sequence) type them into a session. Adding, viewing
-  and editing a secret take the master password; typing one follows the prompt policy.
-  Deleting a secret that command buttons or login sequences still use warns first and names
-  them.
+- **Secrets** are passwords and PINs to type into sessions, such as an `enable` or `sudo`
+  password; a user name is optional. **Add secret** saves one in the vault.
+  [Command buttons](commands.md#buttons-that-send-a-secret), **Send secret…** and
+  [login sequences](adding-hosts.md#login-sequence) type them into a session, and a host or
+  folder can [log in with one](adding-hosts.md#authentication). Adding, viewing and editing
+  a vault secret take the master password; typing one follows the prompt policy. Deleting a
+  secret that command buttons or login sequences still use warns first and names them.
+- **Password managers** that Muxus supports each get a group that says whether Muxus can
+  reach them, with any settings they need. **Add from** *manager* saves where that manager
+  keeps a secret, so its value never enters the vault and no vault is needed. Muxus asks the
+  manager for the value each time it types it; when the manager cannot provide it, a login
+  falls back to the next password or asks you.
 - **View or edit password** asks for the master password before revealing the saved value.
 - **Change master password** changes that management password without rewriting every
   credential.

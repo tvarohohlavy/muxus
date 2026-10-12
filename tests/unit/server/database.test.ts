@@ -54,6 +54,8 @@ describe('MuxusDatabase migrations', () => {
       { version: 27, name: 'login-sequences' },
       { version: 28, name: 'host-paste-pacing' },
       { version: 29, name: 'management-hosts' },
+      { version: 30, name: 'external-secrets' },
+      { version: 31, name: 'host-password-secrets' },
     ]);
   });
 
@@ -145,8 +147,8 @@ describe('MuxusDatabase migrations', () => {
 
     database = new MuxusDatabase(filename);
     expect(database.appliedMigrations().at(-1)).toEqual({
-      version: 29,
-      name: 'management-hosts',
+      version: 31,
+      name: 'host-password-secrets',
     });
     expect(database.savedHostProfile(telnet.id)).toMatchObject({
       name: 'Core switch',
@@ -251,7 +253,7 @@ describe('MuxusDatabase migrations', () => {
     }
 
     database = new MuxusDatabase(filename);
-    expect(database.appliedMigrations().at(-1)).toEqual({ version: 29, name: 'management-hosts' });
+    expect(database.appliedMigrations().at(-1)).toEqual({ version: 31, name: 'host-password-secrets' });
     expect(database.savedHostProfile(rdp.id)).toMatchObject({ name: 'Build server', metadata: { group: 'Lab' } });
     const gnmi = database.saveSavedHostProfile({
       name: 'leaf1',
@@ -398,8 +400,8 @@ describe('MuxusDatabase migrations', () => {
 
     database = new MuxusDatabase(filename);
     expect(database.appliedMigrations().at(-1)).toEqual({
-      version: 29,
-      name: 'management-hosts',
+      version: 31,
+      name: 'host-password-secrets',
     });
     expect(database.passwordVaultConfig()).toMatchObject({
       formatVersion: 2,
@@ -1033,6 +1035,85 @@ describe('credential and workspace safety', () => {
 
     const next = database.upsertCredentialRef(input);
     expect(next.id).not.toBe(rolledBackId);
+  });
+
+  it('keeps where a password manager holds a secret, never the value', () => {
+    database = new MuxusDatabase(':memory:');
+    const ref = { provider: 'external-secret', service: 'muxus/named-secret/v1' };
+    const created = database.createExternalSecret(ref, {
+      label: 'core-sw1 login',
+      username: 'admin',
+      provider: 'fakevault',
+      locator: 'fake://network/core-sw1',
+      options: { account: 'work' },
+    });
+    expect(created).toMatchObject({
+      label: 'core-sw1 login',
+      username: 'admin',
+      provider: 'fakevault',
+      locator: 'fake://network/core-sw1',
+      options: { account: 'work' },
+    });
+    expect(database.listExternalSecrets(ref).map((secret) => secret.id)).toEqual([created.id]);
+    // Another provider's rows, such as the vault's, are not these.
+    expect(database.externalSecretById(created.id, { ...ref, provider: 'muxus-master-vault' })).toBeUndefined();
+
+    const updated = database.updateExternalSecret(created.id, ref, {
+      label: 'core-sw1',
+      provider: 'fakevault',
+      locator: 'fake://network/core-sw1-new',
+      options: {},
+    });
+    expect(updated).toMatchObject({ label: 'core-sw1', locator: 'fake://network/core-sw1-new', options: {} });
+    expect(updated?.username).toBeUndefined();
+    expect(database.updateExternalSecret('missing', ref, { label: 'x', provider: 'p', locator: 'l', options: {} })).toBeUndefined();
+
+    // An option named like a secret would be one.
+    expect(() =>
+      database!.createExternalSecret(ref, {
+        label: 'Leaky',
+        provider: 'fakevault',
+        locator: 'fake://x',
+        options: { password: 'hunter2' },
+      }),
+    ).toThrow(/password vault/);
+    expect(database.listExternalSecrets(ref)).toHaveLength(1);
+
+    // Deleting the name deletes where it pointed.
+    expect(database.deleteEncryptedCredential(created.id, ref.provider)).toBe(true);
+    expect(database.externalSecretById(created.id, ref)).toBeUndefined();
+  });
+
+  it('keeps provider settings per provider and refuses secret-looking keys', () => {
+    database = new MuxusDatabase(':memory:');
+    expect(database.secretProviderSettings('fakevault')).toEqual({});
+    database.setSecretProviderSettings('fakevault', { cliPath: '/opt/fakevault' });
+    database.setSecretProviderSettings('other', { cliPath: '/opt/other' });
+    expect(database.secretProviderSettings('fakevault')).toEqual({ cliPath: '/opt/fakevault' });
+    database.setSecretProviderSettings('fakevault', {});
+    expect(database.secretProviderSettings('fakevault')).toEqual({});
+    expect(database.secretProviderSettings('other')).toEqual({ cliPath: '/opt/other' });
+    expect(() => database!.setSecretProviderSettings('other', { serviceToken: 'ops_123' })).toThrow(
+      /password vault/,
+    );
+  });
+
+  it('remembers which named secret a host logs in with', () => {
+    database = new MuxusDatabase(':memory:');
+    database.updateOpenSshMetadata('core-sw1', { passwordSecretId: 'secret-1' });
+    expect(database.hostPasswordSecretId({ alias: 'core-sw1' })).toBe('secret-1');
+    expect(database.updateOpenSshMetadata('core-sw1', { group: 'Lab' }).passwordSecretId).toBe('secret-1');
+    database.updateOpenSshMetadata('core-sw1', { passwordSecretId: null });
+    expect(database.hostPasswordSecretId({ alias: 'core-sw1' })).toBeUndefined();
+
+    const saved = database.saveSavedHostProfile({
+      name: 'edge',
+      profile: { kind: 'ssh', target: 'admin@edge', useConfig: false },
+    });
+    database.updateSavedHostMetadata(saved.id, { passwordSecretId: 'secret-2' });
+    expect(database.hostPasswordSecretId({ profileId: saved.id })).toBe('secret-2');
+    expect(database.savedHostProfile(saved.id)?.metadata.passwordSecretId).toBe('secret-2');
+    expect(database.hostPasswordSecretId({ alias: 'nowhere' })).toBeUndefined();
   });
 
   it('stores only a credential reference alongside native profile data', () => {

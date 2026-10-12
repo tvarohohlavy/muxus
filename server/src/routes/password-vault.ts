@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import {
   DEFAULT_PASSWORD_VAULT_UNLOCK_POLICY,
+  EXTERNAL_SECRET_LOCATOR_MAX_LENGTH,
   type PasswordVaultStatus,
   type SendVaultSecretResult,
   type VaultSecretSaveResult,
@@ -23,6 +24,8 @@ import {
   VaultUnlockRequiredError,
 } from '../security/password-vault.js';
 import { typeVaultSecret } from '../security/vault-secret-input.js';
+import { SecretProviderError } from '../secret-providers/provider.js';
+import { externalSecretOptionsSchema } from './secret-providers.js';
 import type { TerminalInputWriter } from '../ws/terminal-inputs.js';
 import { VaultKeyStoreUnavailableError } from '../security/vault-key-store.js';
 import { HttpProblem, sendError } from '../util/errors.js';
@@ -56,6 +59,15 @@ const secretSchema = managementSchema.extend({
   name: z.string().max(VAULT_SECRET_NAME_MAX_LENGTH * 4),
   username: z.string().max(VAULT_SECRET_USERNAME_MAX_LENGTH * 4).optional(),
   value: z.string().max(8192).optional(),
+});
+
+// The locator and options are checked again, in characters, by the provider registry.
+const externalSecretSchema = z.object({
+  provider: z.string().min(1).max(64),
+  name: z.string().max(VAULT_SECRET_NAME_MAX_LENGTH * 4),
+  username: z.string().max(VAULT_SECRET_USERNAME_MAX_LENGTH * 4).optional(),
+  locator: z.string().min(1).max(EXTERNAL_SECRET_LOCATOR_MAX_LENGTH * 4),
+  options: externalSecretOptionsSchema.optional(),
 });
 
 const sendSecretSchema = z.object({
@@ -235,6 +247,37 @@ export function registerPasswordVaultRoutes(
     }
   });
 
+  // A secret held by a password manager stores no value, only where the
+  // manager keeps it, so saving one needs neither a vault nor its master
+  // password.
+  app.post('/api/password-vault/external-secrets', (req, reply) => {
+    const parsed = externalSecretSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'A name and where the password manager keeps the secret are required.' });
+    }
+    try {
+      const secret = ctx.vault.createExternalSecret(parsed.data);
+      return { secret, status: ctx.vault.status() } satisfies VaultSecretSaveResult;
+    } catch (err) {
+      return sendVaultError(reply, err);
+    }
+  });
+
+  app.put('/api/password-vault/external-secrets/:id', (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = externalSecretSchema.safeParse(req.body);
+    if (!validCredentialId(id) || !parsed.success) {
+      return reply.code(400).send({ message: 'A valid secret, a name and where the password manager keeps it are required.' });
+    }
+    try {
+      const secret = ctx.vault.updateExternalSecret(id, parsed.data);
+      if (!secret) return sendSecretMissing(reply);
+      return { secret, status: ctx.vault.status() } satisfies VaultSecretSaveResult;
+    } catch (err) {
+      return sendVaultError(reply, err);
+    }
+  });
+
   // Types a secret into live sessions on the backend, so the value never
   // reaches the renderer, the request log, session history or a log file.
   app.post('/api/password-vault/secrets/:id/send', async (req, reply) => {
@@ -270,6 +313,17 @@ export function registerPasswordVaultRoutes(
       if (err instanceof CredentialVaultCorruptError) {
         return sendError(reply, new HttpProblem(422, 'The saved secret could not be decrypted.', 'vault-secret-corrupt'));
       }
+      const external = ctx.vault.externalSecret(id);
+      if (err instanceof SecretProviderError && external) {
+        return sendError(
+          reply,
+          new HttpProblem(
+            502,
+            `${external.providerLabel} could not provide “${external.name}”. ${err.message}`,
+            'secret-provider-unavailable',
+          ),
+        );
+      }
       return sendVaultError(reply, err);
     }
   });
@@ -295,6 +349,9 @@ function sendSecretMissing(reply: FastifyReply): Promise<void> {
 
 /** Shared vault → HTTP problem mapping (also used by the folder routes). */
 export function sendVaultError(reply: FastifyReply, err: unknown): Promise<void> {
+  if (err instanceof SecretProviderError) {
+    return sendError(reply, new HttpProblem(502, err.message, 'secret-provider-unavailable'));
+  }
   if (err instanceof InvalidMasterPasswordError) {
     return sendError(reply, new HttpProblem(401, err.message, 'invalid-master-password'));
   }

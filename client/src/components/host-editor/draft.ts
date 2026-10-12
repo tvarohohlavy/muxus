@@ -77,6 +77,8 @@ export interface HostDraft {
   sessionLogging: HostSessionLoggingDraft;
   /** Muxus-only login steps, saved with the metadata. */
   loginSequence: LoginSequenceDraft;
+  /** Named secret the host logs in with; '' asks or uses a saved password. */
+  passwordSecretId: string;
 }
 
 export function blankDraft(
@@ -130,6 +132,7 @@ export function blankDraft(
     keywordHighlights: { inheritGlobal: true, rules: [] },
     sessionLogging: blankHostSessionLoggingDraft(),
     loginSequence: loginSequenceDraft(undefined),
+    passwordSecretId: '',
   };
 }
 
@@ -189,6 +192,7 @@ export function draftFromEntry(entry: SshHostEntry, duplicate: boolean): HostDra
     },
     sessionLogging: blankHostSessionLoggingDraft(),
     loginSequence: loginSequenceDraft(entry.metadata?.loginSequence),
+    passwordSecretId: entry.metadata?.passwordSecretId ?? '',
   };
 }
 
@@ -254,6 +258,7 @@ export function draftFromSavedSshProfile(
     },
     sessionLogging: blankHostSessionLoggingDraft(),
     loginSequence: loginSequenceDraft(saved.metadata.loginSequence),
+    passwordSecretId: saved.metadata.passwordSecretId ?? '',
   };
 }
 

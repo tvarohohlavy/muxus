@@ -366,6 +366,7 @@ function SshHostEditorContent({
             ? null
             : highlights,
         loginSequence: loginSequenceFromDraft(draft.loginSequence),
+        passwordSecretId: draft.passwordSecretId || null,
       },
     });
   });
@@ -393,6 +394,7 @@ function SshHostEditorContent({
             ? null
             : highlights,
         loginSequence: loginSequenceFromDraft(draft.loginSequence),
+        passwordSecretId: draft.passwordSecretId || null,
       },
     });
   });

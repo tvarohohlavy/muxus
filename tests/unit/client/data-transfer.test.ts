@@ -1112,6 +1112,7 @@ describe('restoring imported serial hosts', () => {
           disableSftp: false,
           consoleCompatibility: false,
           loginSequence: null,
+          passwordSecretId: null,
         }),
       }),
     );

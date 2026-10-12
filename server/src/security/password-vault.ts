@@ -10,6 +10,9 @@ import { open as openFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import {
   DEFAULT_PASSWORD_VAULT_UNLOCK_POLICY,
+  type AuthPromptInfo,
+  type AuthPromptResponse,
+  type ExternalSecretInput,
   type PasswordVaultCredential,
   type PasswordVaultSecret,
   type PasswordVaultStatus,
@@ -17,9 +20,11 @@ import {
 } from '@muxus/shared';
 import type {
   EncryptedCredentialRecord,
+  ExternalSecretRecord,
   MuxusDatabase,
   PasswordVaultConfigRecord,
 } from '../persistence/database.js';
+import { SecretProviderInputError, SecretProviders } from '../secret-providers/registry.js';
 import {
   MemoryVaultKeyStore,
   SystemVaultKeyStore,
@@ -34,6 +39,13 @@ export const MASTER_PASSWORD_MAX_BYTES = 1024;
 export const SSH_PASSWORD_MAX_BYTES = 8192;
 /** Named secrets that are not tied to a login, such as an `enable` password. */
 export const NAMED_SECRET_SERVICE = 'muxus/named-secret/v1';
+/**
+ * Named secrets whose value stays in a password manager. Muxus keeps only
+ * where the manager keeps it, so these live outside the encrypted vault and
+ * survive its reset.
+ */
+export const EXTERNAL_SECRET_PROVIDER = 'external-secret';
+const EXTERNAL_SECRET_REF = { provider: EXTERNAL_SECRET_PROVIDER, service: NAMED_SECRET_SERVICE };
 export const VAULT_SECRET_NAME_MAX_LENGTH = 80;
 export const VAULT_SECRET_USERNAME_MAX_LENGTH = 256;
 
@@ -162,12 +174,15 @@ export class PasswordVault {
   private osKeyStoreAvailable = true;
   private initialized = false;
   private readonly keyStore: VaultKeyStore;
+  private readonly providers: SecretProviders;
 
   constructor(
     private readonly database: MuxusDatabase,
     private readonly options: {
       kdf?: PasswordVaultKdf;
       keyStore?: VaultKeyStore;
+      /** Password managers that hold named secrets' values; none by default. */
+      providers?: SecretProviders;
     } = {},
   ) {
     this.keyStore =
@@ -175,6 +190,7 @@ export class PasswordVault {
       (database.filename === ':memory:'
         ? new MemoryVaultKeyStore()
         : new SystemVaultKeyStore());
+    this.providers = options.providers ?? new SecretProviders(database);
   }
 
   async initialize(): Promise<void> {
@@ -228,7 +244,23 @@ export class PasswordVault {
     };
   }
 
+  /**
+   * Named secrets, sorted by name: those encrypted in the vault and those
+   * whose value stays in a password manager, which need no vault at all.
+   */
   secrets(): PasswordVaultSecret[] {
+    const external = this.database
+      .listExternalSecrets(EXTERNAL_SECRET_REF)
+      .map((record) => this.externalSecretMetadata(record));
+    const encrypted = this.encryptedSecrets();
+    if (external.length === 0) return encrypted;
+    return [...encrypted, ...external].sort(
+      (a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id),
+    );
+  }
+
+  private encryptedSecrets(): PasswordVaultSecret[] {
     return this.database
       .listEncryptedCredentials(PASSWORD_VAULT_PROVIDER, NAMED_SECRET_SERVICE)
       .map(
@@ -544,18 +576,42 @@ export class PasswordVault {
   }
 
   hasSecret(id: string): boolean {
-    return this.secretRecord(id) !== undefined;
+    return this.secretRecord(id) !== undefined || this.externalRecord(id) !== undefined;
+  }
+
+  /**
+   * Set when a password manager holds the secret's value: its name and the
+   * manager's, for messages. Such a secret needs no master password.
+   */
+  externalSecret(id: string): { name: string; providerLabel: string } | undefined {
+    const record = this.externalRecord(id);
+    if (!record) return undefined;
+    return { name: record.label ?? 'Secret', providerLabel: this.providers.label(record.provider) };
   }
 
   /**
    * A named secret's value for typing into a session. Like a saved SSH
-   * password, it follows the prompt policy: no master password while the
-   * vault is unlocked, otherwise `masterPassword` is required.
+   * password, a vault secret follows the prompt policy: no master password
+   * while the vault is unlocked, otherwise `masterPassword` is required. A
+   * secret held by a password manager is asked for each time; the manager
+   * may ask the user to approve, and its failures are SecretProviderErrors.
    */
   async secretValue(
     id: string,
     masterPassword?: string,
+    options: {
+      signal?: AbortSignal;
+      ask?: (prompt: AuthPromptInfo) => Promise<AuthPromptResponse>;
+    } = {},
   ): Promise<string | undefined> {
+    const external = this.externalRecord(id);
+    if (external) {
+      return this.providers.read(
+        external.provider,
+        { locator: external.locator, options: external.options },
+        options,
+      );
+    }
     const record = this.secretRecord(id);
     if (!record) return undefined;
     const access = await this.credentialKey(masterPassword);
@@ -645,10 +701,40 @@ export class PasswordVault {
   }
 
   deleteCredential(id: string): boolean {
-    return this.database.deleteEncryptedCredential(
-      id,
-      PASSWORD_VAULT_PROVIDER,
+    return (
+      this.database.deleteEncryptedCredential(id, PASSWORD_VAULT_PROVIDER) ||
+      this.database.deleteEncryptedCredential(id, EXTERNAL_SECRET_PROVIDER)
     );
+  }
+
+  /**
+   * Save a named secret whose value stays in a password manager. Muxus keeps
+   * its name and where the manager keeps it, so neither a vault nor its
+   * master password is needed.
+   */
+  createExternalSecret(input: ExternalSecretInput): PasswordVaultSecret {
+    const details = this.secretDetails(input);
+    const location = this.externalLocation(input);
+    const record = this.database.createExternalSecret(EXTERNAL_SECRET_REF, {
+      label: details.name,
+      username: details.username,
+      provider: input.provider,
+      ...location,
+    });
+    return this.externalSecretMetadata(record);
+  }
+
+  updateExternalSecret(id: string, input: ExternalSecretInput): PasswordVaultSecret | undefined {
+    if (!this.externalRecord(id)) return undefined;
+    const details = this.secretDetails(input, id);
+    const location = this.externalLocation(input);
+    const record = this.database.updateExternalSecret(id, EXTERNAL_SECRET_REF, {
+      label: details.name,
+      username: details.username,
+      provider: input.provider,
+      ...location,
+    });
+    return record ? this.externalSecretMetadata(record) : undefined;
   }
 
   /** Remove a saved SSH password by its vault account; needs no vault key. */
@@ -690,6 +776,40 @@ export class PasswordVault {
   private secretRecord(id: string): EncryptedCredentialRecord | undefined {
     const record = this.database.encryptedCredentialById(id, PASSWORD_VAULT_PROVIDER);
     return record?.service === NAMED_SECRET_SERVICE ? record : undefined;
+  }
+
+  private externalRecord(id: string): ExternalSecretRecord | undefined {
+    return this.database.externalSecretById(id, EXTERNAL_SECRET_REF);
+  }
+
+  /** A checked locator and options, ready to store. */
+  private externalLocation(input: ExternalSecretInput): {
+    locator: string;
+    options: Record<string, string>;
+  } {
+    try {
+      return this.providers.checkSecret(input.provider, input.locator, input.options);
+    } catch (err) {
+      if (err instanceof SecretProviderInputError) throw new InvalidVaultSecretError(err.message);
+      throw err;
+    }
+  }
+
+  private externalSecretMetadata(record: ExternalSecretRecord): PasswordVaultSecret {
+    const hasOptions = Object.keys(record.options).length > 0;
+    return {
+      id: record.id,
+      name: record.label ?? 'Secret',
+      ...(record.username ? { username: record.username } : {}),
+      external: {
+        provider: record.provider,
+        providerLabel: this.providers.label(record.provider),
+        locator: record.locator,
+        ...(hasOptions ? { options: record.options } : {}),
+      },
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
   }
 
   /** A trimmed name no other secret uses, and the optional user name. */

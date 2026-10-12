@@ -17,9 +17,12 @@ import { PasswordVault } from '../../../server/src/security/password-vault.js';
 import { MemoryVaultKeyStore } from '../../../server/src/security/vault-key-store.js';
 import {
   secretKeystrokes,
+  typeSecretValue,
   typeVaultSecret,
 } from '../../../server/src/security/vault-secret-input.js';
+import { SecretProviders } from '../../../server/src/secret-providers/registry.js';
 import { TerminalInputs } from '../../../server/src/ws/terminal-inputs.js';
+import { FakeSecretProvider } from './fake-secret-provider.js';
 
 const TOKEN = 'vault-secret-input-token';
 const MASTER = 'master-pass-12';
@@ -51,10 +54,12 @@ const digest = (text: string) => createHash('sha256').update(text).digest('hex')
 let built: Awaited<ReturnType<typeof buildApp>>;
 let base: string;
 let scratch: string;
+let provider: FakeSecretProvider;
 const sockets: WebSocket[] = [];
 
 beforeEach(async () => {
   scratch = mkdtempSync(path.join(os.tmpdir(), 'muxus-vault-secret-'));
+  provider = new FakeSecretProvider({ 'fake://network/core-sw1/enable': SECRET });
   built = await buildApp(
     resolveConfig({
       token: TOKEN,
@@ -63,6 +68,7 @@ beforeEach(async () => {
       prettyLogs: false,
       staticRoot: '/path/that/does/not/exist',
     }),
+    { secretProviders: [provider] },
   );
   await built.app.listen({ host: '127.0.0.1', port: 0 });
   base = `127.0.0.1:${(built.app.server.address() as AddressInfo).port}`;
@@ -256,6 +262,41 @@ describe('typing vault secrets into sessions', () => {
   });
 });
 
+describe('typing secrets from a password manager into sessions', () => {
+  it('types what the manager returns, and says which one failed and why', async () => {
+    const create = (name: string, locator: string) =>
+      api<{ secret: { id: string } }>('POST', '/api/password-vault/external-secrets', {
+        provider: 'fakevault',
+        name,
+        locator,
+      });
+    const enable = (await create('Core enable', 'fake://network/core-sw1/enable')).body.secret.id;
+    const missing = (await create('Edge enable', 'fake://network/edge/enable')).body.secret.id;
+    const session = await openPromptSession();
+
+    const sent = await api<{ sent: number }>('POST', `/api/password-vault/secrets/${enable}/send`, {
+      terminalIds: [session.terminalId],
+      enter: true,
+    });
+    expect(sent).toMatchObject({ status: 200, body: { sent: 1 } });
+    expect(sent.raw).not.toContain(SECRET);
+    await vi.waitFor(() => expect(session.output()).toContain(`received ${digest(SECRET)}`));
+    expect(session.output()).not.toContain(SECRET);
+
+    const refused = await api<{ code: string; message: string }>('POST', `/api/password-vault/secrets/${missing}/send`, {
+      terminalIds: [session.terminalId],
+      enter: true,
+    });
+    expect(refused).toMatchObject({
+      status: 502,
+      body: {
+        code: 'secret-provider-unavailable',
+        message: 'FakeVault could not provide “Edge enable”. FakeVault has nothing at that path.',
+      },
+    });
+  });
+});
+
 describe('vault secret keystrokes', () => {
   it('types the value and an optional Enter', async () => {
     expect(secretKeystrokes('pa ss', false).toString()).toBe('pa ss');
@@ -283,6 +324,35 @@ describe('vault secret keystrokes', () => {
       await expect(typeVaultSecret(vault, secret.id, writers, { enter: true })).resolves.toBe(1);
       expect(written).toEqual([`${SECRET}\r`]);
       await expect(typeVaultSecret(vault, 'gone', writers, { enter: true })).resolves.toBeUndefined();
+      expect(typeSecretValue('by hand', writers, false)).toBe(1);
+      expect(written.at(-1)).toBe('by hand');
+    } finally {
+      vault.dispose();
+      database.close();
+    }
+  });
+
+  it('hands the caller’s cancel and prompt to the password manager', async () => {
+    const database = new MuxusDatabase(':memory:');
+    const fake = new FakeSecretProvider({ 'fake://enable': SECRET });
+    fake.passphrase = 'open sesame';
+    const vault = new PasswordVault(database, { providers: new SecretProviders(database, [fake]) });
+    try {
+      await vault.initialize();
+      const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'Enable', locator: 'fake://enable' });
+      const written: string[] = [];
+      const writers = [(data: Buffer) => written.push(data.toString()) > 0];
+      const ask = vi.fn(() => Promise.resolve({ answers: ['open sesame'] }));
+      await expect(typeVaultSecret(vault, secret.id, writers, { enter: false, ask })).resolves.toBe(1);
+      expect(ask).toHaveBeenCalledOnce();
+      expect(written).toEqual([SECRET]);
+
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        typeVaultSecret(vault, secret.id, writers, { enter: false, ask, signal: controller.signal }),
+      ).rejects.toMatchObject({ problem: 'cancelled' });
+      expect(written).toEqual([SECRET]);
     } finally {
       vault.dispose();
       database.close();
