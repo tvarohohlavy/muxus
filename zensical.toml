@@ -48,6 +48,7 @@ nav = [
     { "Tunnels & port forwarding" = "guide/tunnels.md" },
     { "Graphical apps (X11)" = "guide/x11.md" },
     { "Command buttons & multi-exec" = "guide/commands.md" },
+    { "1Password" = "guide/1password.md" },
     { "Session history" = "guide/session-history.md" },
     { "Settings" = "guide/settings.md" },
   ] },
