@@ -594,7 +594,7 @@ async function fakeOnePasswordCli(page) {
         if (provider.descriptor.id !== 'onepassword') continue;
         provider.status = {
           available: true,
-          summary: 'Found the 1Password CLI 2.40.0 at /usr/local/bin/op.',
+          summary: 'Found the 1Password CLI 2.40.0.',
           detected: { cliPath: '/usr/local/bin/op' },
         };
       }

@@ -93,7 +93,7 @@ describe('1Password as a secret provider', () => {
       status: 200,
       body: {
         settings: { cliPath: op },
-        status: { available: true, summary: `Found the 1Password CLI 2.30.0 at ${op}.` },
+        status: { available: true, summary: 'Found the 1Password CLI 2.30.0.', detected: { cliPath: op } },
       },
     });
 

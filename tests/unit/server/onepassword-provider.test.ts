@@ -291,7 +291,7 @@ describe('OnePasswordProvider', () => {
     });
     await expect(available.status({ settings: {}, refresh: false })).resolves.toEqual({
       available: true,
-      summary: 'Found the 1Password CLI 2.32.0 at /usr/bin/op.',
+      summary: 'Found the 1Password CLI 2.32.0.',
       detected: { cliPath: '/usr/bin/op' },
     });
     // Cached until refreshed or the configured path changes.
@@ -333,7 +333,7 @@ describe('OnePasswordProvider with a real executable', () => {
     await expect(read(onePassword, reference)).resolves.toBe(`read|--no-newline|${reference}|`);
     await expect(onePassword.status({ settings: {}, refresh: true })).resolves.toEqual({
       available: true,
-      summary: `Found the 1Password CLI --version| at ${op}.`,
+      summary: 'Found the 1Password CLI --version|.',
       detected: { cliPath: op },
     });
   });

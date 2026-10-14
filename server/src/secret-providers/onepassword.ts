@@ -135,7 +135,8 @@ export class OnePasswordProvider implements SecretProvider {
     }
     let status: SecretProviderStatus;
     const file = this.locate(configured);
-    const detected = file && !configured ? { detected: { cliPath: file } } : {};
+    // Where it was found is shown apart from the sentence: the path is long.
+    const detected = file ? { detected: { cliPath: file } } : {};
     if (!file) {
       status = { available: false, summary: missing(configured).message };
     } else {
@@ -144,7 +145,7 @@ export class OnePasswordProvider implements SecretProvider {
         const version = valueFromStdout(stdout).trim().split(/\r?\n/)[0]?.slice(0, 64);
         status = {
           available: true,
-          summary: `Found the 1Password CLI${version ? ` ${version}` : ''} at ${file}.`,
+          summary: `Found the 1Password CLI${version ? ` ${version}` : ''}.`,
           ...detected,
         };
       } catch (err) {
