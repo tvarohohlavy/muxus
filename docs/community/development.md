@@ -123,7 +123,9 @@ A secret provider lets named secrets stay in a password manager. Providers live 
 - `status` says whether the provider can be used now, for Settings.
 - `read` returns the value or rejects with a `SecretProviderError` whose message is shown to
   the user. It gets the saved settings, an abort signal, and `ask` for a question the user
-  can answer in the session.
+  can answer in the session. A session reads its login secrets as it opens, before anyone
+  can answer: such a read's `ask` answers as skipped, and Muxus reads again when the value
+  is needed.
 
 `cli.ts` has helpers for providers that run a command-line tool: finding it on `PATH` and in
 known folders, running it without a shell, and sorting out its failures. Register the

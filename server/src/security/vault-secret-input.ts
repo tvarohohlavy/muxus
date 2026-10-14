@@ -1,5 +1,6 @@
 import type { AuthPromptInfo, AuthPromptResponse } from '@muxus/shared';
 import type { TerminalInputWriter } from '../ws/terminal-inputs.js';
+import type { EarlySecretReads } from './early-secret-reads.js';
 import type { PasswordVault } from './password-vault.js';
 
 /** A secret as keystrokes: its text, then Enter (a carriage return, as the key sends) when asked. */
@@ -16,6 +17,9 @@ export function secretKeystrokes(value: string, enter: boolean): Buffer {
  * pass through so callers can ask for the master password and try again, or
  * explain.
  *
+ * A password manager's value read early for this use is taken from
+ * `earlySecrets` instead of being read again.
+ *
  * Resolves to the number of sessions that took the secret, or undefined when
  * the secret is no longer in the vault.
  */
@@ -28,12 +32,17 @@ export async function typeVaultSecret(
     masterPassword?: string;
     signal?: AbortSignal;
     ask?: (prompt: AuthPromptInfo) => Promise<AuthPromptResponse>;
+    earlySecrets?: EarlySecretReads;
   },
 ): Promise<number | undefined> {
-  const value = await vault.secretValue(secretId, options.masterPassword, {
-    signal: options.signal,
-    ask: options.ask,
-  });
+  const readNow = () =>
+    vault.secretValue(secretId, options.masterPassword, {
+      signal: options.signal,
+      ask: options.ask,
+    });
+  const value = await (options.earlySecrets
+    ? options.earlySecrets.read(secretId, readNow, options.signal)
+    : readNow());
   if (value === undefined) return undefined;
   return typeSecretValue(value, writers, options.enter);
 }

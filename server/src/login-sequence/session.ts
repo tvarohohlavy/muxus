@@ -10,6 +10,7 @@ import {
   VaultUnlockRequiredError,
   type PasswordVault,
 } from '../security/password-vault.js';
+import type { EarlySecretReads } from '../security/early-secret-reads.js';
 import { typeSecretValue, typeVaultSecret } from '../security/vault-secret-input.js';
 import { SecretProviderError } from '../secret-providers/provider.js';
 import type { TerminalInputWriter } from '../ws/terminal-inputs.js';
@@ -29,6 +30,8 @@ export interface LoginSequenceSessionOptions {
   recorder: { input(data: Buffer): void; system(message: string): void };
   send(message: TerminalServerMessage): void;
   log?: { warn(details: object, message: string): void };
+  /** Password-manager reads started for this session; closed once the sequence ends. */
+  earlySecrets?: EarlySecretReads;
 }
 
 /**
@@ -69,9 +72,13 @@ export class LoginSequenceSession {
   start(): void {
     if (this.started) return;
     this.started = true;
-    void this.runner.run().catch((err: unknown) => {
-      this.options.log?.warn({ err }, 'login sequence failed');
-    });
+    void this.runner
+      .run()
+      .catch((err: unknown) => {
+        this.options.log?.warn({ err }, 'login sequence failed');
+      })
+      // Nothing takes a value read early once the sequence is over.
+      .finally(() => this.options.earlySecrets?.close());
   }
 
   close(): void {
@@ -119,6 +126,7 @@ export class LoginSequenceSession {
           masterPassword,
           signal,
           ask: async (prompt) => (await this.prompt(prompt, signal)) ?? { answers: [], skipped: true },
+          earlySecrets: this.options.earlySecrets,
         });
         if (typed === undefined) return 'its secret is no longer in the password vault.';
         return typed > 0 ? undefined : 'the session no longer takes input.';

@@ -65,7 +65,8 @@ Three modes, matching OpenSSH behaviour:
 server asks for a password. It comes before a password remembered for the host and before
 the folder's. When it is unavailable, the next password Muxus knows is tried; when the
 server refuses it, you are asked. Only the secret's ID is kept, in the Muxus database and
-never in `ssh_config`.
+never in `ssh_config`. A secret in a password manager is read as the tab opens, while the
+connection is made.
 
 ## Connection route
 
@@ -114,7 +115,7 @@ connects, and again after every reconnect, for SSH, Telnet and serial hosts alik
 | --- | --- |
 | **Wait for** | Waits until the text appears in the output. With **.\*** turned on, the text is a JavaScript regular expression. The sequence stops when nothing matches before the timeout, 10 seconds unless changed. |
 | **Send text** | Types the text, then presses Enter unless the ⏎ toggle is off. Empty text with Enter only presses Enter. |
-| **Send secret** | Types a [named secret](settings.md#passwords), from the vault or from a password manager Muxus supports, then presses Enter unless the ⏎ toggle is off. The sequence keeps only which secret it types, never the value. When the manager cannot provide it, you are asked to type the value; it is typed into the session and not saved. |
+| **Send secret** | Types a [named secret](settings.md#passwords), from the vault or from a password manager Muxus supports, then presses Enter unless the ⏎ toggle is off. The sequence keeps only which secret it types, never the value. A secret in a password manager is read as the session opens, while the earlier steps run. When the manager cannot provide it, you are asked to type the value; it is typed into the session and not saved. |
 
 The arrows on each row reorder the steps. Matching ignores colours and other escape
 sequences, treats every line ending as one newline, and finds text that arrives in several
