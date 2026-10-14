@@ -384,9 +384,11 @@ async function handleSession(
       writeInput?.(input);
     }
   });
+  const connectAbort = new AbortController();
   socket.on('close', () => {
     socketOpen = false;
     control.close();
+    connectAbort.abort();
   });
 
   let connectTimer: NodeJS.Timeout | undefined;
@@ -407,6 +409,7 @@ async function handleSession(
   socket.on('close', () => clearInterval(keepalive));
 
   const io: ConnectIo = {
+    signal: connectAbort.signal,
     status: (message, options) => {
       recorder?.system(message);
       sendControl(socket, { op: 'status', message, transient: options?.transient });

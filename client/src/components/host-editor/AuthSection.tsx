@@ -235,8 +235,9 @@ export function AuthSection({
             <Box>
               <Typography variant="subtitle2">Login password</Typography>
               <Typography variant="caption" color="textSecondary">
-                When the server asks for a password, Muxus first types this secret. If it is
-                unavailable or refused, you are asked as usual.
+                When the server asks for a password, Muxus first types this secret. When it is
+                unavailable, the next password Muxus knows is tried; when the server refuses it,
+                you are asked.
               </Typography>
             </Box>
             <VaultSecretField

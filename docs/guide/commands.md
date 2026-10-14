@@ -39,7 +39,8 @@ command.
 
 An `enable` or configure-mode password, a `sudo` password or a PIN does not belong in a
 command, where it would be saved in plain text and copied into backups. Save it as a
-[secret in the password vault](settings.md#passwords) instead and let a button type it:
+[named secret](settings.md#passwords) instead, in the vault or in a password manager Muxus
+supports, and let a button type it:
 
 1. In the command-button manager, switch the button from **Command** to **Secret**.
 2. Pick the secret, or choose **New secret…** to add one on the spot.
@@ -53,8 +54,10 @@ it to the selected sessions like any other input. The value never passes through
 window, the quick launcher, [session history](session-history.md) or log files; only what
 the remote side echoes back can be recorded, and a password prompt echoes nothing.
 
-Using a secret follows the vault's prompt policy: with **Never** it is typed straight away,
-otherwise Muxus asks for the master password first.
+A vault secret follows the vault's prompt policy: with **Never** it is typed straight away,
+otherwise Muxus asks for the master password first. A secret in a password manager is asked
+for each time, so the manager may ask you to approve; when it cannot provide the value, the
+button reports why.
 
 Deleting a secret that buttons still use warns first. Those buttons then show a
 :material-alert-outline: warning, stay disabled and say that their secret is missing, until

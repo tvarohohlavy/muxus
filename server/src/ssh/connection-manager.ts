@@ -83,7 +83,7 @@ import {
   sshPasswordLabel,
 } from '../security/password-vault.js';
 import { VaultKeyStoreUnavailableError } from '../security/vault-key-store.js';
-import { SecretProviderError } from '../secret-providers/provider.js';
+import { SecretProviderError, type SecretProviderProblem } from '../secret-providers/provider.js';
 import {
   expandIdentityPath,
   isConcreteAlias,
@@ -110,6 +110,8 @@ export interface HostKeyChallenge {
 
 /** Interactive hooks a connection attempt needs from the UI. */
 export interface ConnectIo {
+  /** Aborted when the session that asked goes away; a provider read stops waiting. */
+  signal?: AbortSignal;
   status(message: string, options?: { transient?: boolean }): void;
   /** Ask the user to answer auth prompts (password, 2FA, key passphrase). */
   prompt(info: AuthPromptInfo): Promise<AuthPromptResponse>;
@@ -1788,6 +1790,14 @@ function isKeyboardInteractivePasswordPrompt(prompts: readonly Prompt[]): boolea
 
 type InteractionRunner = <T>(interaction: () => Promise<T>) => Promise<T>;
 
+/** Problems that fail every secret a password manager holds, not just the one asked for. */
+const PROVIDER_WIDE_PROBLEMS: ReadonlySet<SecretProviderProblem> = new Set<SecretProviderProblem>([
+  'not-installed',
+  'locked',
+  'unreachable',
+  'timeout',
+]);
+
 /** The named secret an SSH host logs in with: an OpenSSH alias's, or a Muxus-owned host's. */
 export type HostPasswordSecretLookup = (
   host: { alias: string } | { profileId: string },
@@ -1872,6 +1882,8 @@ class AuthLadder {
   private lastPasswordCandidate: RememberedPasswordCandidate | undefined;
   private partialPasswordCandidate: RememberedPasswordCandidate | undefined;
   private savedPasswordAttempted = false;
+  /** The named secret tried last as this hop's password; unset when a saved password was. */
+  private triedSecretName: string | undefined;
   private retryKeyboardInteractive = false;
   /** The method last offered to the server, and those it partially accepted. */
   private lastMethod: AuthenticationType | undefined;
@@ -2173,10 +2185,7 @@ class AuthLadder {
       this.io.prompt({
         host: promptLabel,
         purpose: 'ssh-password',
-        instructions:
-          this.savedPasswordAttempted
-            ? 'The saved password was unavailable or was not accepted. Enter the current password.'
-            : undefined,
+        instructions: this.retryInstructions(),
         prompts: [
           {
             prompt:
@@ -2241,14 +2250,11 @@ class AuthLadder {
     const saved = await this.availableSavedPassword(credential, promptLabel);
     if (saved !== undefined) return [saved];
 
-    const retryInstructions = this.savedPasswordAttempted
-      ? 'The saved password was unavailable or was not accepted. Enter the current password.'
-      : undefined;
     const response = await this.runInteraction(() =>
       this.io.prompt({
         name: name || undefined,
         instructions:
-          [retryInstructions, instructions || undefined]
+          [this.retryInstructions(), instructions || undefined]
             .filter((item): item is string => !!item)
             .join('\n\n') || undefined,
         host: promptLabel,
@@ -2266,6 +2272,14 @@ class AuthLadder {
     );
     this.capturePasswordCandidate(response, credential);
     return response.answers;
+  }
+
+  /** Why the user is asked after a saved password or a named secret was tried. */
+  private retryInstructions(): string | undefined {
+    if (!this.savedPasswordAttempted) return undefined;
+    return this.triedSecretName === undefined
+      ? 'The saved password was unavailable or was not accepted. Enter the current password.'
+      : `The password from “${this.triedSecretName}” was unavailable or was not accepted. Enter the current password.`;
   }
 
   private passwordCredential(): PasswordCredential {
@@ -2295,18 +2309,30 @@ class AuthLadder {
       ...(credential.existing ? [{ account: credential.account, label: credential.label }] : []),
       ...(this.hop.folderPasswords ?? []),
     ];
+    // A host and its folder may name the same secret: one read, one approval.
+    // A manager that is missing, locked or not answering fails every secret
+    // it holds, so its later candidates are not asked again.
+    const tried = new Set<string>();
+    const failedProviders = new Set<string>();
     for (const source of sources) {
       if ('secretId' in source) {
         // A secret deleted since it was chosen is no candidate.
-        if (!vault.hasSecret(source.secretId)) continue;
+        if (tried.has(source.secretId) || !vault.hasSecret(source.secretId)) continue;
+        tried.add(source.secretId);
+        const provider = vault.externalSecret(source.secretId)?.provider;
+        if (provider !== undefined && failedProviders.has(provider)) continue;
         this.savedPasswordAttempted = true;
         const result = await this.secretPassword(source.secretId, source.label, promptLabel);
         if (result.value !== undefined) return result.value;
-        if (result.unavailable) continue;
-        return undefined;
+        if (result.problem === undefined) return undefined;
+        if (provider !== undefined && PROVIDER_WIDE_PROBLEMS.has(result.problem)) {
+          failedProviders.add(provider);
+        }
+        continue;
       }
       if (!vault.hasSshPassword(source.account)) continue;
       this.savedPasswordAttempted = true;
+      this.triedSecretName = undefined;
       const saved = await this.savedPassword(source.account, source.label);
       if (saved !== undefined) {
         this.io.status(`Using the saved password for ${source.label}.`, {
@@ -2322,18 +2348,20 @@ class AuthLadder {
    * A named secret's value as this hop's password. A vault secret follows
    * the vault's prompt policy like a saved password. A password manager may
    * wait for the user to approve Muxus; when it cannot provide the value,
-   * the reason is shown and the next candidate, or the password prompt,
-   * takes over.
+   * the reason is shown and answered with the problem kind, so the next
+   * candidate, or the password prompt, takes over. A read cut short because
+   * the session went away ends the ladder, like a dismissed prompt.
    */
   private async secretPassword(
     secretId: string,
     label: string,
     promptLabel: string,
-  ): Promise<{ value?: string; unavailable?: boolean }> {
+  ): Promise<{ value?: string; problem?: SecretProviderProblem }> {
     const vault = this.vault!;
     const external = vault.externalSecret(secretId);
     if (external) {
       const { name, providerLabel } = external;
+      this.triedSecretName = name;
       this.io.status(`Asking ${providerLabel} for “${name}” to log in to ${label} …`, {
         transient: true,
       });
@@ -2341,6 +2369,7 @@ class AuthLadder {
         // Approving in the password manager is the user's time, like a prompt.
         const value = await this.runInteraction(() =>
           vault.secretValue(secretId, undefined, {
+            signal: this.io.signal,
             ask: (prompt) => this.io.prompt({ host: promptLabel, ...prompt }),
           }),
         );
@@ -2350,11 +2379,13 @@ class AuthLadder {
         return { value };
       } catch (err) {
         if (!(err instanceof SecretProviderError)) throw err;
+        if (err.problem === 'cancelled') throw new Error('authentication cancelled');
         this.io.status(`${providerLabel} could not provide “${name}”: ${err.message}`);
-        return { unavailable: true };
+        return { problem: err.problem };
       }
     }
     const name = vault.secrets().find((secret) => secret.id === secretId)?.name ?? 'the saved secret';
+    this.triedSecretName = name;
     try {
       let value: string | undefined;
       if (!vault.status().locked) {

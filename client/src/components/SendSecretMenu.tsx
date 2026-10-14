@@ -130,9 +130,7 @@ export function SendSecretMenu() {
         </Typography>
       </ListSubheader>
       {empty ? (
-        <MenuItem disabled>
-          {vault?.configured === false ? 'No password vault yet' : 'No secrets saved yet'}
-        </MenuItem>
+        <MenuItem disabled>No secrets yet. Add one under Settings → Passwords.</MenuItem>
       ) : null}
       {!empty && filtered.length === 0 && !isLoading ? (
         <MenuItem disabled>No matching secrets</MenuItem>

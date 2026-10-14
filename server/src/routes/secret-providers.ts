@@ -77,8 +77,15 @@ export function registerSecretProviderRoutes(app: FastifyInstance, ctx: AppConte
       }
       return sendError(reply, err);
     }
+    // A client that gives up mid-read (the manager's approval prompt can
+    // wait minutes) must not hold the provider's queue. The reply's close is
+    // the signal: the request's own fires as soon as its body is read.
+    const controller = new AbortController();
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableFinished) controller.abort();
+    });
     try {
-      await ctx.secretProviders.read(id, request);
+      await ctx.secretProviders.read(id, request, { signal: controller.signal });
       return reply.header('cache-control', 'no-store').send({ ok: true });
     } catch (err) {
       if (err instanceof SecretProviderError) {

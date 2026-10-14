@@ -237,11 +237,6 @@ the operating-system credential store.
   folder can [log in with one](adding-hosts.md#authentication). Adding, viewing and editing
   a vault secret take the master password; typing one follows the prompt policy. Deleting a
   secret that command buttons or login sequences still use warns first and names them.
-- **Password managers** that Muxus supports each get a group that says whether Muxus can
-  reach them, with any settings they need. **Add from** *manager* saves where that manager
-  keeps a secret, so its value never enters the vault and no vault is needed. Muxus asks the
-  manager for the value each time it types it; when the manager cannot provide it, a login
-  falls back to the next password or asks you.
 - **View or edit password** asks for the master password before revealing the saved value.
 - **Change master password** changes that management password without rewriting every
   credential.
@@ -261,7 +256,8 @@ stored in the application-data directory.
 **Create backup** writes the Muxus-side data to a file: folders, colours, saved
 Telnet/serial hosts, workspaces, tunnels, login sequences and preferences. **Restore a backup**
 merges a file back in; items absent from the file are not deleted. A login sequence's secret
-steps keep only which vault secret they type.
+steps keep only which secret they type, and so does a host's or folder's login password; on
+another machine they show as **Missing secret** until one is chosen again.
 
 **Export OpenSSH** writes the SSH hosts out as a standard `ssh_config` for use with another
 client. Non-secret shared folder defaults are copied into each affected host block so the

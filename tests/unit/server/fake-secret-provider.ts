@@ -63,7 +63,17 @@ export class FakeSecretProvider implements SecretProvider {
 
   async read(request: SecretReadRequest, context: SecretReadContext): Promise<string> {
     this.reads.push({ locator: request.locator, options: request.options, settings: context.settings });
-    if (this.gate) await this.gate;
+    const { signal } = context;
+    if (signal?.aborted) throw cancelled();
+    if (this.gate) {
+      // Like a real manager, a read that is told to stop stops waiting at once.
+      const gate = this.gate;
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => reject(cancelled());
+        signal?.addEventListener('abort', onAbort, { once: true });
+        gate.then(resolve, reject).finally(() => signal?.removeEventListener('abort', onAbort));
+      });
+    }
     if (this.failure) throw this.failure;
     if (this.passphrase !== undefined) {
       const response = await context.ask?.({
@@ -80,4 +90,8 @@ export class FakeSecretProvider implements SecretProvider {
     }
     return value;
   }
+}
+
+function cancelled(): SecretProviderError {
+  return new SecretProviderError('cancelled', 'Cancelled.');
 }

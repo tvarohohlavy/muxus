@@ -84,12 +84,14 @@ afterEach(() => {
 async function setup(
   port: number,
   provider: FakeSecretProvider,
-  options: { vault?: boolean } = {},
+  options: { vault?: boolean; hosts?: Array<{ alias: string; user: string }> } = {},
 ): Promise<{ manager: SshConnectionManager; vault: PasswordVault; database: MuxusDatabase }> {
   const configFile = path.join(tmp, `ssh_config-${counter++}`);
   writeFileSync(
     configFile,
-    ['Host lab', '  HostName 127.0.0.1', '  User tester', `  Port ${port}`, '  StrictHostKeyChecking no', ''].join('\n'),
+    (options.hosts ?? [{ alias: 'lab', user: 'tester' }])
+      .flatMap(({ alias, user }) => [`Host ${alias}`, '  HostName 127.0.0.1', `  User ${user}`, `  Port ${port}`, '  StrictHostKeyChecking no', ''])
+      .join('\n'),
   );
   const database = new MuxusDatabase(':memory:');
   const vault = new PasswordVault(database, { providers: new SecretProviders(database, [provider]) });
@@ -122,8 +124,10 @@ async function setup(
 
 function makeIo(
   answer: (prompt: string) => string = () => PASSWORD,
+  signal?: AbortSignal,
 ): ConnectIo & { prompts: number; asked: AuthPromptInfo[]; statuses: string[] } {
   const io = {
+    ...(signal ? { signal } : {}),
     prompts: 0,
     asked: [] as AuthPromptInfo[],
     statuses: [] as string[],
@@ -260,6 +264,93 @@ describe('logging in with a named secret', () => {
     await connect(stale.manager, second);
     expect(second.prompts).toBe(1);
     expect(attempts).toEqual([true, false, true]);
+    // The prompt names the secret, not a saved password the host never had.
+    for (const io of [first, second]) {
+      expect(io.asked[0]?.instructions).toBe(
+        'The password from “core-sw1 login” was unavailable or was not accepted. Enter the current password.',
+      );
+    }
+  });
+
+  it('asks a missing password manager once, however many secrets it holds', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const failure = new SecretProviderError('not-installed', 'The FakeVault CLI is not installed.');
+    const provider = new FakeSecretProvider({}, { failure });
+    const { manager, vault, database } = await setup(port, provider, { vault: false });
+    const hostSecret = vault.createExternalSecret({ provider: 'fakevault', name: 'core-sw1 login', locator: LOCATOR });
+    const folderSecret = vault.createExternalSecret({ provider: 'fakevault', name: 'TACACS', locator: 'fake://network/tacacs' });
+    database.updateOpenSshMetadata('lab', { passwordSecretId: hostSecret.id });
+    database.upsertFolderSettings('Lab', { passwordSecretId: folderSecret.id });
+
+    const io = makeIo();
+    await connect(manager, io);
+
+    expect(provider.reads.map((read) => read.locator)).toEqual([LOCATOR]);
+    expect(io.statuses.filter((status) => status.includes('could not provide'))).toEqual([
+      'FakeVault could not provide “core-sw1 login”: The FakeVault CLI is not installed.',
+    ]);
+    expect(io.prompts).toBe(1);
+    expect(attempts).toEqual([true]);
+  });
+
+  it('reads a secret named by both the host and its folder once', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const failure = new SecretProviderError('denied', 'FakeVault did not allow access.');
+    const provider = new FakeSecretProvider({}, { failure });
+    const { manager, vault, database } = await setup(port, provider, { vault: false });
+    const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'TACACS', locator: LOCATOR });
+    database.updateOpenSshMetadata('lab', { passwordSecretId: secret.id });
+    database.upsertFolderSettings('Lab', { passwordSecretId: secret.id });
+
+    const io = makeIo();
+    await connect(manager, io);
+
+    expect(provider.reads).toHaveLength(1);
+    expect(io.statuses.filter((status) => status.includes('could not provide'))).toHaveLength(1);
+    expect(io.prompts).toBe(1);
+    expect(attempts).toEqual([true]);
+  });
+
+  it('stops waiting on the password manager when the session goes away, and lets the next one ask', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const provider = new FakeSecretProvider({ [LOCATOR]: PASSWORD, 'fake://network/core-sw2': PASSWORD });
+    let open!: () => void;
+    provider.gate = new Promise((resolve) => (open = resolve));
+    // A different user, so the second host dials its own transport instead
+    // of waiting on the first host's.
+    const { manager, vault, database } = await setup(port, provider, {
+      vault: false,
+      hosts: [{ alias: 'lab', user: 'tester' }, { alias: 'lab2', user: 'operator' }],
+    });
+    const first = vault.createExternalSecret({ provider: 'fakevault', name: 'core-sw1 login', locator: LOCATOR });
+    const second = vault.createExternalSecret({ provider: 'fakevault', name: 'core-sw2 login', locator: 'fake://network/core-sw2' });
+    database.updateOpenSshMetadata('lab', { passwordSecretId: first.id });
+    database.updateOpenSshMetadata('lab2', { passwordSecretId: second.id });
+
+    // The first session's read waits on the manager (the gate); the second
+    // queues behind it, as the registry runs one read per provider at a time.
+    const controller = new AbortController();
+    const abandoned = makeIo(undefined, controller.signal);
+    const abandonedConnect = connect(manager, abandoned);
+    abandonedConnect.catch(() => undefined);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(1));
+    const next = makeIo();
+    const nextConnect = connect(manager, next, { kind: 'ssh', target: 'lab2' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(provider.reads).toHaveLength(1);
+
+    controller.abort();
+    await expect(abandonedConnect).rejects.toThrow(/cancelled/);
+    // The second read starts before the manager ever answers the first.
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(2));
+
+    open();
+    await nextConnect;
+    expect(next.prompts).toBe(0);
+    expect(attempts).toEqual([true]);
   });
 
   it('logs in with a vault secret too, and skips one that was deleted', async () => {

@@ -812,6 +812,44 @@ describe('backing up login sequences', () => {
   });
 });
 
+describe('backing up login password secrets', () => {
+  it('carries the secret ID, and only the ID, from a backup into the restored host', async () => {
+    mockBackupSnapshot([], [
+      {
+        id: 'router',
+        kind: 'ssh',
+        name: 'Core router',
+        profile: { kind: 'ssh', profileId: 'router', target: 'router.example.test', useConfig: false },
+        metadata: { profileId: 'router', passwordSecretId: 'vault-secret-1', connectCount: 0 },
+        createdAt: '2026-08-10T00:00:00.000Z',
+        updatedAt: '2026-08-10T00:00:00.000Z',
+      },
+    ]);
+
+    const document = await createBackupDocument();
+    const exported = document.data.savedHosts[0];
+    expect(exported?.metadata.passwordSecretId).toBe('vault-secret-1');
+    const text = JSON.stringify(document);
+    expect(text).toContain('vault-secret-1');
+
+    apiFetchMock.mockReset();
+    apiFetchMock
+      .mockResolvedValueOnce({ hosts: [] })
+      .mockResolvedValueOnce({ profiles: [] })
+      .mockResolvedValueOnce({ id: 'router' })
+      .mockResolvedValueOnce({ id: 'router' });
+
+    await expect(
+      restoreImportedConnections(parseTransferDocument(text).data, 'replace'),
+    ).resolves.toEqual({ added: 1, updated: 0, skipped: 0 });
+    const patch = apiFetchMock.mock.calls.find(([url]) => url === '/api/profiles/router/metadata');
+    expect(patch?.[1]?.method).toBe('PATCH');
+    expect(JSON.parse(patch?.[1]?.body as string)).toMatchObject({
+      passwordSecretId: 'vault-secret-1',
+    });
+  });
+});
+
 describe('backing up host terminal schemes', () => {
   it('keeps the per-host override in portable metadata', async () => {
     mockBackupSnapshot([], [

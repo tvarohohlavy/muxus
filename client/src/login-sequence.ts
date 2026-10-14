@@ -206,10 +206,23 @@ function isLoginStep(value: unknown): value is LoginSequenceStep {
   }
 }
 
-/** Where a login sequence is set: a host or a folder, by the name the user knows it by. */
+/**
+ * Where a login sequence or a login password is set: a host or a folder, by
+ * the name the user knows it by.
+ */
 export interface LoginSequenceOwner {
   label: string;
   loginSequence?: LoginSequence;
+  /** The named secret the host or folder logs in with, when it has one. */
+  passwordSecretId?: string;
+}
+
+/** The hosts and folders that log in with this vault secret as their password. */
+export function hostsLoggingInWithSecret(
+  owners: readonly LoginSequenceOwner[],
+  secretId: string,
+): string[] {
+  return owners.filter((owner) => owner.passwordSecretId === secretId).map((owner) => owner.label);
 }
 
 /** The hosts and folders whose own login sequence types this vault secret. */

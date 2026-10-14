@@ -319,6 +319,46 @@ describe('buildChain with saved Muxus jump hosts', () => {
     expect(chain[0]!.folderPasswords).toEqual([{ account: 'acct', label: 'Folder' }]);
   });
 
+  it('gives each configured hop the named secret of its own alias', () => {
+    const secrets: Record<string, string> = { bastion: 'secret-bastion', app: 'secret-app' };
+    const chain = buildChain(
+      docOf(['Host app', '  ProxyJump bastion', '', 'Host bastion', '  HostName bastion.example.com'].join('\n')),
+      { target: 'app' },
+      undefined,
+      undefined,
+      undefined,
+      (host) => ('alias' in host ? secrets[host.alias] : undefined),
+    );
+
+    expect(chain.map((hop) => [hop.spec.host, hop.passwordSecretId])).toEqual([
+      ['bastion', 'secret-bastion'],
+      ['app', 'secret-app'],
+    ]);
+  });
+
+  it('looks a saved jump host’s secret up by its profile ID, and leaves a hop without one bare', () => {
+    const lookups: Array<{ alias: string } | { profileId: string }> = [];
+    const chain = buildChain(
+      docOf(''),
+      { target: 'app.internal', useConfig: false, profileId: 'app', proxyJump: [savedHostHop('bastion')] },
+      undefined,
+      undefined,
+      savedFor,
+      (host) => {
+        lookups.push(host);
+        return 'profileId' in host && host.profileId === 'bastion' ? 'secret-bastion' : undefined;
+      },
+    );
+
+    // Each Muxus-owned hop is looked up by its profile ID, never by its target.
+    expect(lookups.toSorted((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))).toEqual([
+      { profileId: 'app' },
+      { profileId: 'bastion' },
+    ]);
+    expect(chain[0]!.passwordSecretId).toBe('secret-bastion');
+    expect(chain[1]).not.toHaveProperty('passwordSecretId');
+  });
+
   it('names a missing saved jump host', () => {
     expect(() =>
       buildChain(
