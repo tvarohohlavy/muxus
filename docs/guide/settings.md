@@ -261,7 +261,8 @@ stored in the application-data directory.
 **Create backup** writes the Muxus-side data to a file: folders, colours, saved
 Telnet/serial hosts, workspaces, tunnels, login sequences and preferences. **Restore a backup**
 merges a file back in; items absent from the file are not deleted. A login sequence's secret
-steps keep only which vault secret they type.
+steps keep only which secret they type, and so does a host's or folder's login password; on
+another machine they show as **Missing secret** until one is chosen again.
 
 **Export OpenSSH** writes the SSH hosts out as a standard `ssh_config` for use with another
 client. Non-secret shared folder defaults are copied into each affected host block so the

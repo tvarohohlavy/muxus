@@ -1,13 +1,34 @@
-import { describe, expect, it } from 'vitest';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import {
   absolutePathProblem,
   cliFailureProblem,
+  failureSignal,
   failureStderr,
   findExecutable,
+  isExecutableFile,
   lastErrorLine,
   runCli,
   valueFromStdout,
 } from '../../../server/src/secret-providers/cli.js';
+
+const isWindows = process.platform === 'win32';
+
+/** A directory with a copy of "op" that may be run, and one that may not. */
+const fixture = mkdtempSync(path.join(os.tmpdir(), 'muxus-cli-'));
+const liveDir = path.join(fixture, 'live');
+const deadDir = path.join(fixture, 'dead');
+for (const [directory, mode] of [
+  [liveDir, 0o755],
+  [deadDir, 0o644],
+] as const) {
+  mkdirSync(directory);
+  writeFileSync(path.join(directory, 'op'), '#!/bin/sh\nexit 0\n');
+  chmodSync(path.join(directory, 'op'), mode);
+}
+afterAll(() => rmSync(fixture, { recursive: true, force: true }));
 
 describe('findExecutable', () => {
   const files = (...paths: string[]) => (file: string) => paths.includes(file);
@@ -50,6 +71,28 @@ describe('findExecutable', () => {
       }),
     ).toBe('C:\\Program Files\\1Password CLI\\op.exe');
   });
+
+  it('unquotes a configured path and, on Windows, tries it with .exe', () => {
+    const exe = 'C:\\Program Files\\1Password CLI\\op.exe';
+    const isFile = files(exe);
+    expect(findExecutable('op', { configured: `"${exe}"`, env: {}, isFile, platform: 'win32' })).toBe(exe);
+    expect(
+      findExecutable('op', { configured: 'C:\\Program Files\\1Password CLI\\op', env: {}, isFile, platform: 'win32' }),
+    ).toBe(exe);
+    // Elsewhere the name is taken as given.
+    expect(
+      findExecutable('op', { configured: '/opt/tool/op', env: {}, isFile: files('/opt/tool/op.exe'), platform: 'linux' }),
+    ).toBeUndefined();
+  });
+
+  it.skipIf(isWindows)('passes over a copy on PATH that cannot be run', () => {
+    expect(isExecutableFile(path.join(liveDir, 'op'))).toBe(true);
+    expect(isExecutableFile(path.join(deadDir, 'op'))).toBe(false);
+    expect(isExecutableFile(deadDir)).toBe(false);
+    expect(findExecutable('op', { env: { PATH: `${deadDir}:${liveDir}` }, platform: 'linux' })).toBe(
+      path.join(liveDir, 'op'),
+    );
+  });
 });
 
 describe('running a CLI', () => {
@@ -62,7 +105,7 @@ describe('running a CLI', () => {
     expect(stdout.every((byte) => byte === 0)).toBe(true);
   });
 
-  it('rejects with the program’s stderr, and wipes what it printed', async () => {
+  it('rejects with the program’s stderr when it ran and failed', async () => {
     const error = await runCli(
       process.execPath,
       ['-e', 'process.stdout.write("half"); console.error("[ERROR] first\\n\\u001b[31mdenied\\u001b[0m"); process.exit(3)'],
@@ -100,6 +143,31 @@ describe('running a CLI', () => {
     expect(cliFailureProblem(chatty)).toBe('failed');
   });
 
+  it.skipIf(isWindows)('tells a program it may not run from one that is not there', async () => {
+    const dead = await runCli(path.join(deadDir, 'op'), [], { timeout: 10_000 }).catch((err: unknown) => err);
+    expect(cliFailureProblem(dead)).toBe('not-executable');
+    expect(failureSignal(dead)).toBeUndefined();
+  });
+
+  // Windows reports a process that ended itself as an exit code, not a signal.
+  it.skipIf(isWindows)('names the signal that ended a program when Muxus did not send it', async () => {
+    const died = await runCli(process.execPath, ['-e', 'process.kill(process.pid, "SIGTERM")'], {
+      timeout: 10_000,
+    }).catch((err: unknown) => err);
+    expect(failureSignal(died)).toBe('SIGTERM');
+    expect(cliFailureProblem(died)).toBeUndefined();
+
+    const stopped = await runCli(process.execPath, ['-e', 'setTimeout(() => {}, 10_000)'], {
+      timeout: 200,
+    }).catch((err: unknown) => err);
+    expect(failureSignal(stopped)).toBeUndefined();
+
+    const exited = await runCli(process.execPath, ['-e', 'process.exit(2)'], { timeout: 10_000 }).catch(
+      (err: unknown) => err,
+    );
+    expect(failureSignal(exited)).toBeUndefined();
+  });
+
   it('keeps a value as printed unless asked to drop the line break', () => {
     expect(valueFromStdout(Buffer.from('a b\n'))).toBe('a b\n');
     expect(valueFromStdout(Buffer.from('a b\r\n'), { trimNewline: true })).toBe('a b');
@@ -113,6 +181,7 @@ describe('running a CLI', () => {
 
   it('wants a full path for a CLI location', () => {
     expect(absolutePathProblem('/usr/bin/op', 'the CLI')).toBeUndefined();
+    expect(absolutePathProblem(' "/usr/bin/op" ', 'the CLI')).toBeUndefined();
     expect(absolutePathProblem('op', 'the CLI')).toBe('Enter the full path to the CLI.');
   });
 });

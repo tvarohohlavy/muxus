@@ -142,7 +142,7 @@ same secret-free check as everything else in the database.
 
 At each use the backend asks the provider for the value and types it straight into the
 session, exactly like a vault secret. The manager may ask the user to approve; reads for one
-provider run one at a time, so several sessions opening together can share one approval. A
+provider run one at a time, so several sessions opening together do not all ask at once. A
 provider may also ask the user a question, such as a passphrase, in the session's own
 prompt; the answer is not saved.
 
@@ -166,6 +166,8 @@ A host or folder can name a secret, from the vault or a password manager, to log
 Only the secret's ID is stored, in the Muxus database and never in `ssh_config`. At login
 the order is: the host's secret, the host's saved password, then each folder from nearest
 to farthest, its secret before its saved password. A secret that was deleted is skipped.
+The ID travels in a backup like a command button's, so a host or folder restored on another
+machine refers to a secret that is not there until another is chosen.
 
 ## Host keys
 

@@ -24,11 +24,20 @@ export function saveSecretProviderSettings(
   });
 }
 
-/** Ask the provider for the value and throw it away: resolves when it could provide it. */
-export function testExternalSecret(id: string, request: ExternalSecretTestRequest): Promise<{ ok: true }> {
+/**
+ * Ask the provider for the value and throw it away: resolves when it could
+ * provide it. The provider may wait minutes for the user's approval, so the
+ * caller can give up early through `signal`.
+ */
+export function testExternalSecret(
+  id: string,
+  request: ExternalSecretTestRequest,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<{ ok: true }> {
   return apiFetch<{ ok: true }>(`/api/secret-providers/${encodeURIComponent(id)}/test`, {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify(request),
+    signal,
   });
 }

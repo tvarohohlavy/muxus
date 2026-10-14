@@ -39,7 +39,7 @@ export function commandButtonsUsingSecret(
   return buttons.filter((button) => button.secretId === secretId);
 }
 
-/** Match every search word against a secret's name or user name. */
+/** Match every search word against a secret's name, user name or password manager. */
 export function filterVaultSecrets(
   secrets: readonly PasswordVaultSecret[],
   query: string,
@@ -47,7 +47,8 @@ export function filterVaultSecrets(
   const words = query.trim().toLowerCase().split(SEARCH_WORD_SEPARATOR).filter(Boolean);
   if (words.length === 0) return secrets;
   return secrets.filter((secret) => {
-    const searchable = `${secret.name} ${secret.username ?? ''}`.toLowerCase();
+    const searchable =
+      `${secret.name} ${secret.username ?? ''} ${secret.external?.providerLabel ?? ''}`.toLowerCase();
     return words.every((word) => searchable.includes(word));
   });
 }

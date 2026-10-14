@@ -50,7 +50,7 @@ import { showErrorToast, showToast } from '../state/toast.js';
 import { commandButtonLabel } from '../command-buttons.js';
 import { commandButtonsUsingSecret } from '../vault-secrets.js';
 import { fetchLoginSequenceOwners } from '../api/folder-settings.js';
-import { loginSequencesUsingSecret } from '../login-sequence.js';
+import { hostsLoggingInWithSecret, loginSequencesUsingSecret } from '../login-sequence.js';
 import { VaultSecretDialog } from './VaultSecretDialog.js';
 import { ExternalSecretDialog } from './ExternalSecretDialog.js';
 import {
@@ -108,16 +108,15 @@ export function PasswordVaultSection() {
 
   const forgetSecret = async (secret: PasswordVaultSecret) => {
     const users = commandButtonsUsingSecret(usePrefsStore.getState().commandButtons, secret.id);
-    const sequences = loginSequencesUsingSecret(
-      await fetchLoginSequenceOwners().catch(() => []),
-      secret.id,
-    );
+    const owners = await fetchLoginSequenceOwners().catch(() => []);
+    const sequences = loginSequencesUsingSecret(owners, secret.id);
+    const logins = hostsLoggingInWithSecret(owners, secret.id);
     const confirmed = await confirmAction({
       title: `Delete “${secret.name}”?`,
       description: [
         users.length
           ? `${users.length === 1 ? 'A saved command still types' : `${users.length} saved commands still type`} it: ${quotedList(users.map(commandButtonLabel))}. ${users.length === 1 ? 'Its button' : 'Their buttons'} will show that the secret is missing.`
-          : sequences.length
+          : sequences.length || logins.length
             ? ''
             : secret.external
               ? 'Muxus forgets where to find it.'
@@ -125,6 +124,11 @@ export function PasswordVaultSection() {
         sequences.length
           ? `The login sequence of ${quotedList(sequences)} types it too and will stop at that step.`
           : '',
+        logins.length === 1
+          ? `${quotedList(logins)} logs in with it and will ask for the password instead.`
+          : logins.length
+            ? `${logins.length} hosts or folders log in with it: ${quotedList(logins)}. They will ask for the password instead.`
+            : '',
         secret.external ? `The item itself stays in ${secret.external.providerLabel}.` : '',
       ]
         .filter(Boolean)

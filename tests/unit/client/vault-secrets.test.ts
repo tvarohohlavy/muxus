@@ -27,6 +27,13 @@ const sendMock = vi.mocked(sendVaultSecret);
 const secrets = [
   { id: 's1', name: 'Core enable', createdAt: '', updatedAt: '' },
   { id: 's2', name: 'Lab sudo', username: 'admin', createdAt: '', updatedAt: '' },
+  {
+    id: 's3',
+    name: 'Edge login',
+    external: { provider: 'fakevault', providerLabel: 'FakeVault', locator: 'fake://edge' },
+    createdAt: '',
+    updatedAt: '',
+  },
 ];
 const status = { secrets } as unknown as PasswordVaultStatus;
 
@@ -75,9 +82,10 @@ describe('secret references', () => {
     expect(commandButtonsUsingSecret(buttons, 's2')).toEqual([]);
   });
 
-  it('searches secrets by name and user name', () => {
+  it('searches secrets by name, user name and password manager', () => {
     expect(filterVaultSecrets(secrets, 'ADMIN')).toEqual([secrets[1]]);
     expect(filterVaultSecrets(secrets, 'core enable')).toEqual([secrets[0]]);
+    expect(filterVaultSecrets(secrets, 'fakevault edge')).toEqual([secrets[2]]);
     expect(filterVaultSecrets(secrets, ' ')).toBe(secrets);
   });
 });

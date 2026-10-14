@@ -296,10 +296,18 @@ export function registerPasswordVaultRoutes(
         new HttpProblem(409, 'The session is no longer connected.', 'terminal-unavailable'),
       );
     }
+    // A client that gives up while the password manager waits for approval
+    // must not hold the provider's queue. The reply's close is the signal:
+    // the request's own fires as soon as its body is read.
+    const controller = new AbortController();
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableFinished) controller.abort();
+    });
     try {
       const sent = await typeVaultSecret(ctx.vault, id, writers, {
         enter: parsed.data.enter,
         masterPassword: parsed.data.masterPassword,
+        signal: controller.signal,
       });
       if (sent === undefined) return sendSecretMissing(reply);
       if (sent === 0) {

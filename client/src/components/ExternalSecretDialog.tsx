@@ -48,13 +48,38 @@ export function ExternalSecretDialog({
   const [options, setOptions] = useState<Record<string, string>>(secret?.external?.options ?? {});
   const [error, setError] = useState<string>();
   const [test, setTest] = useState<TestState>();
+  /** Set while the secret is being saved. */
   const [busy, setBusy] = useState(false);
+  /** Set while the provider is being asked for the value. */
+  const [testing, setTesting] = useState(false);
   const firstFieldRef = useRef<HTMLInputElement>(null);
+  const testRun = useRef<AbortController>(null);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => firstFieldRef.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, []);
+
+  /**
+   * Stop waiting for the provider. Its approval prompt may be hidden or
+   * ignored for minutes, so the user must always be able to leave; the
+   * provider finishes or times out on its own.
+   */
+  const cancelTest = () => {
+    const run = testRun.current;
+    if (!run) return;
+    testRun.current = null;
+    run.abort();
+    setTesting(false);
+    setTest(undefined);
+  };
+
+  useEffect(() => cancelTest, []);
+
+  const close = () => {
+    cancelTest();
+    onClose();
+  };
 
   /** Only the options with a value; the backend checks them all again. */
   const filledOptions = () =>
@@ -63,23 +88,37 @@ export function ExternalSecretDialog({
     );
 
   const runTest = async () => {
+    cancelTest();
+    const run = new AbortController();
+    testRun.current = run;
     setError(undefined);
-    setBusy(true);
+    setTesting(true);
     setTest({
       tone: 'info',
       text: `Asking ${descriptor.label}… Approve Muxus in ${descriptor.label} if it asks.`,
     });
     try {
-      await testExternalSecret(descriptor.id, { locator: locator.trim(), options: filledOptions() });
+      await testExternalSecret(
+        descriptor.id,
+        { locator: locator.trim(), options: filledOptions() },
+        { signal: run.signal },
+      );
+      if (testRun.current !== run) return;
       setTest({ tone: 'success', text: `${descriptor.label} provided a value.` });
     } catch (err) {
+      // A cancelled or superseded run has nothing to report.
+      if (testRun.current !== run) return;
       setTest({ tone: 'error', text: err instanceof Error ? err.message : String(err) });
     } finally {
-      setBusy(false);
+      if (testRun.current === run) {
+        testRun.current = null;
+        setTesting(false);
+      }
     }
   };
 
   const save = async () => {
+    if (testing) return;
     if (!name.trim()) {
       setError('Give the secret a name.');
       return;
@@ -117,7 +156,7 @@ export function ExternalSecretDialog({
   };
 
   return (
-    <Dialog open onClose={busy ? undefined : onClose} maxWidth="sm" fullWidth>
+    <Dialog open onClose={busy ? undefined : close} maxWidth="sm" fullWidth>
       <DialogTitle>
         {secret ? `Edit ${descriptor.label} secret` : `Add ${descriptor.label} secret`}
       </DialogTitle>
@@ -157,7 +196,8 @@ export function ExternalSecretDialog({
             autoComplete="off"
             onChange={(event) => {
               setLocator(event.target.value);
-              setTest(undefined);
+              // A test of the old value would answer for the new one.
+              cancelTest();
             }}
             onKeyDown={submitOnEnter}
             helperText={descriptor.locator.help}
@@ -172,7 +212,7 @@ export function ExternalSecretDialog({
               autoComplete="off"
               onChange={(event) => {
                 setOptions((current) => ({ ...current, [field.key]: event.target.value }));
-                setTest(undefined);
+                cancelTest();
               }}
               onKeyDown={submitOnEnter}
               helperText={field.help}
@@ -187,13 +227,17 @@ export function ExternalSecretDialog({
         </Stack>
       </DialogContent>
       <DialogActions>
-        <Button disabled={busy || !locator.trim()} onClick={() => void runTest()} sx={{ mr: 'auto' }}>
+        <Button
+          disabled={busy || testing || !locator.trim()}
+          onClick={() => void runTest()}
+          sx={{ mr: 'auto' }}
+        >
           Test
         </Button>
-        <Button disabled={busy} onClick={onClose}>
+        <Button disabled={busy} onClick={close}>
           Cancel
         </Button>
-        <Button variant="contained" disabled={busy} onClick={() => void save()}>
+        <Button variant="contained" disabled={busy || testing} onClick={() => void save()}>
           Save secret
         </Button>
       </DialogActions>
