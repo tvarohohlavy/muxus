@@ -151,11 +151,19 @@ starts reading the secrets its login will need: the first password each SSH hop 
 would try, when a password manager holds it, and the secrets the host's login sequence
 types. These reads run while the connection is made, each serves one use, and a value read
 early stays only in the backend's memory. It is dropped once used, when the login sequence
-ends (or, without one, once the connection is up), when the tab closes, or after a minute.
+ends (or, without one, once the connection is up), when the tab closes, or when nobody took
+it within a minute of the connection being up. A session reads one secret at a time from
+each manager, so when several tabs open together, every tab's login password is read before
+any tab's sequence secrets.
+
 The manager's approval prompt therefore appears as the tab opens, and a read is wasted when
-a key logs in or the sequence stops before its step. A read whose provider wanted to ask
-the user something is made again when the value is needed, so the question appears there.
-Nothing is read early for **Send secret…** or command buttons, or from the vault.
+a key logs in or the sequence stops before its step. A host whose last login since Muxus
+started took no password (a key alone) has its password read only when the server asks for
+it. A value read early is not used, and the secret is read again when needed, when the
+provider wanted to ask the user something (so the question appears there), when the secret
+was deleted or pointed at another item since, or when the read failed because the manager
+was locked, not running or did not answer before anyone needed the value. Nothing is read
+early for **Send secret…** or command buttons, or from the vault.
 
 When a provider cannot give a value, nothing is typed: an SSH login moves on to the next
 saved password or the prompt, a login sequence asks the user to type the value for that

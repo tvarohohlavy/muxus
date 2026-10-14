@@ -32,6 +32,10 @@ export class FakeSecretProvider implements SecretProvider {
   gate: Promise<void> | undefined;
   /** Each read asks for this passphrase first and fails as locked without it. */
   passphrase: string | undefined;
+  /** When set, a skipped passphrase question gives this value instead of failing. */
+  skippedValue: string | undefined;
+  /** Failures for the next reads, one each, before `failure`. */
+  readonly nextFailures: SecretProviderError[] = [];
 
   constructor(
     public fields: Record<string, string> = {},
@@ -74,12 +78,15 @@ export class FakeSecretProvider implements SecretProvider {
         gate.then(resolve, reject).finally(() => signal?.removeEventListener('abort', onAbort));
       });
     }
+    const next = this.nextFailures.shift();
+    if (next) throw next;
     if (this.failure) throw this.failure;
     if (this.passphrase !== undefined) {
       const response = await context.ask?.({
         name: `Unlock ${this.descriptor.label}`,
         prompts: [{ prompt: 'Passphrase', echo: false }],
       });
+      if (response?.skipped && this.skippedValue !== undefined) return this.skippedValue;
       if (response?.answers[0] !== this.passphrase) {
         throw new SecretProviderError('locked', `${this.descriptor.label} stayed locked.`);
       }

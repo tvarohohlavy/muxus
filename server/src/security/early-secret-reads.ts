@@ -1,17 +1,23 @@
 import type { AuthPromptResponse } from '@muxus/shared';
-import { SecretProviderError } from '../secret-providers/provider.js';
+import { SecretProviderError, type SecretProviderProblem } from '../secret-providers/provider.js';
 import type { PasswordVault } from './password-vault.js';
 
-/** How long a value read early waits to be used before it is dropped. */
+/** How long a value read early waits to be used, once the session is connected. */
 export const EARLY_READ_KEEP_MS = 60_000;
 
 /** The answer an early read gets when its provider asks the user something. */
 const NOBODY_TO_ASK: AuthPromptResponse = { answers: [], skipped: true };
 
+/** Failures that may be gone by the time the value is needed: the manager was busy, closed or locked. */
+const PASSING_PROBLEMS: ReadonlySet<SecretProviderProblem> = new Set(['timeout', 'unreachable', 'locked']);
+
 interface EarlyRead {
   readonly value: Promise<string | undefined>;
+  /** Where the manager kept the secret when the read started. */
+  readonly location: string;
   /** Whether the provider wanted to ask the user something. */
   readonly asked: () => boolean;
+  settled: boolean;
   expiry?: NodeJS.Timeout;
 }
 
@@ -23,15 +29,27 @@ interface EarlyRead {
  *
  * Each read started serves one use. A value stays only in memory and is
  * dropped once used, when the reads are closed, or when nobody took it
- * within a minute. Vault secrets are not read early: they decrypt at once
- * and may need the master password. An early read cannot ask the user
- * anything; when the provider wanted to, the read is made again when the
- * value is needed, so the question appears there.
+ * within a minute of the session connecting. Vault secrets are not read
+ * early: they decrypt at once and may need the master password.
+ *
+ * A session reads one secret at a time from each manager, so when several
+ * sessions open together, every session's first secret (its login
+ * password) is read before any session's second.
+ *
+ * An early read is not used, and the secret is read again when needed,
+ * when the provider wanted to ask the user something (nobody could answer
+ * yet, so the question should appear where the value is needed), when the
+ * secret was deleted or pointed elsewhere since, or when the read failed
+ * for a reason that may have passed (the manager was busy, closed or
+ * locked) before anyone needed it.
  */
 export class EarlySecretReads {
   private readonly reads = new Map<string, EarlyRead[]>();
+  /** Per provider, this session's newest read: the next one starts after it. */
+  private readonly tails = new Map<string, Promise<unknown>>();
   private readonly controller = new AbortController();
   private readonly keepMs: number;
+  private isConnected = false;
 
   constructor(
     private readonly vault: Pick<PasswordVault, 'externalSecret' | 'secretValue'>,
@@ -51,48 +69,72 @@ export class EarlySecretReads {
   start(secretIds: Iterable<string>): void {
     for (const id of secretIds) {
       if (this.controller.signal.aborted) return;
-      if (!this.vault.externalSecret(id)) continue;
+      const external = this.vault.externalSecret(id);
+      if (!external) continue;
       let asked = false;
-      const read: EarlyRead = {
-        value: this.vault.secretValue(id, undefined, {
+      const value = (this.tails.get(external.provider) ?? Promise.resolve()).then(() =>
+        this.vault.secretValue(id, undefined, {
           signal: this.controller.signal,
           ask: async () => {
             asked = true;
             return NOBODY_TO_ASK;
           },
         }),
-        asked: () => asked,
-      };
+      );
+      this.tails.set(external.provider, value.then(ignore, ignore));
+      const read: EarlyRead = { value, location: external.location, asked: () => asked, settled: false };
       const queue = this.reads.get(id);
       if (queue) queue.push(read);
       else this.reads.set(id, [read]);
       // A failure is reported by the step that takes the read.
-      const keep = () => {
-        if (!this.reads.get(id)?.includes(read)) return;
-        read.expiry = setTimeout(() => this.remove(id, read), this.keepMs);
-        read.expiry.unref();
+      const settle = () => {
+        read.settled = true;
+        this.keep(id, read);
       };
-      void read.value.then(keep, keep);
+      void value.then(settle, settle);
+    }
+  }
+
+  /** The session is connected: from now, a value nobody takes within the time is dropped. */
+  connected(): void {
+    this.isConnected = true;
+    for (const [id, queue] of this.reads) {
+      for (const read of queue) if (read.settled) this.keep(id, read);
     }
   }
 
   /**
-   * A secret's value for one use: the oldest early read of it, or `readNow`
-   * when there is none, or when the early read wanted to ask the user
-   * something. `signal` stops waiting for an early read, as for any read.
+   * A secret's value for one use: the oldest early read of it that can
+   * still be used, or `readNow` when there is none, or when the early read
+   * cannot stand (see the class comment). `signal` stops waiting for an
+   * early read, as for any read.
    */
   async read(
     secretId: string,
     readNow: () => Promise<string | undefined>,
     signal?: AbortSignal,
   ): Promise<string | undefined> {
-    const early = this.take(secretId);
-    if (!early) return readNow();
-    try {
-      return await abortable(early.value, signal);
-    } catch (err) {
-      if (early.asked() && !signal?.aborted && !this.controller.signal.aborted) return readNow();
-      throw err;
+    for (;;) {
+      const early = this.take(secretId);
+      if (!early) return readNow();
+      // Deleted, or pointed at another item, since the read started.
+      if (this.vault.externalSecret(secretId)?.location !== early.location) continue;
+      const settledBeforeUse = early.settled;
+      let value: string | undefined;
+      try {
+        value = await abortable(early.value, signal);
+      } catch (err) {
+        if (this.stopped(signal)) throw err;
+        // Another early read of this secret may have got the value.
+        if (this.reads.has(secretId)) continue;
+        const passed =
+          settledBeforeUse && err instanceof SecretProviderError && PASSING_PROBLEMS.has(err.problem);
+        if (early.asked() || passed) return readNow();
+        throw err;
+      }
+      if (!early.asked()) return value;
+      if (this.stopped(signal)) throw cancelled();
+      return readNow();
     }
   }
 
@@ -103,6 +145,16 @@ export class EarlySecretReads {
       for (const read of queue) clearTimeout(read.expiry);
     }
     this.reads.clear();
+  }
+
+  private stopped(signal: AbortSignal | undefined): boolean {
+    return signal?.aborted === true || this.controller.signal.aborted;
+  }
+
+  private keep(secretId: string, read: EarlyRead): void {
+    if (!this.isConnected || read.expiry || !this.reads.get(secretId)?.includes(read)) return;
+    read.expiry = setTimeout(() => this.remove(secretId, read), this.keepMs);
+    read.expiry.unref();
   }
 
   private take(secretId: string): EarlyRead | undefined {
@@ -123,11 +175,17 @@ export class EarlySecretReads {
   }
 }
 
+function ignore(): void {}
+
+function cancelled(): SecretProviderError {
+  return new SecretProviderError('cancelled', 'Cancelled.');
+}
+
 /** The promise's outcome, unless the signal fires first. */
 function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return promise;
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new SecretProviderError('cancelled', 'Cancelled.'));
+    const onAbort = () => reject(cancelled());
     if (signal.aborted) {
       onAbort();
       return;

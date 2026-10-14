@@ -358,6 +358,8 @@ export class SshConnectionManager {
   >();
   /** Dial plans whose optional integration setup killed the remote transport; reset on app restart. */
   private readonly automaticPlainShellKeys = new Set<string>();
+  /** Hosts (as user@host:port) whose last login took no password; reset on app restart. */
+  private readonly loggedInWithoutPassword = new Set<string>();
   private readonly loadConfig: () => ConfigDocument;
   private readonly vault: PasswordVault | undefined;
   private readonly savedSshProfile: ((id: string) => SshProfile | undefined) | undefined;
@@ -868,9 +870,18 @@ export class SshConnectionManager {
     reused?.retain();
     if (reuseJumpHops && this.vault && io.earlySecrets) {
       // Each hop's password from a password manager is read while the hops
-      // connect, rather than once the server asks for it.
+      // connect, rather than once the server asks for it. A host that last
+      // logged in with a key alone will most likely do so again.
       const vault = this.vault;
-      io.earlySecrets.start(chain.slice(first).flatMap((hop) => firstManagerPassword(hop, vault) ?? []));
+      io.earlySecrets.start(
+        chain
+          .slice(first)
+          .flatMap((hop) =>
+            this.loggedInWithoutPassword.has(hopPasswordAccount(hop))
+              ? []
+              : (firstManagerPassword(hop, vault) ?? []),
+          ),
+      );
     }
     const postAuth: Promise<void>[] = [];
     let dialed: Client | undefined;
@@ -1269,12 +1280,19 @@ export class SshConnectionManager {
         if (settled) return;
         ready = true;
         settled = true;
+        const authMethods = auth.acceptedMethods();
+        const account = hopPasswordAccount(hop);
+        if (authMethods.some((method) => method === 'password' || method === 'keyboard-interactive')) {
+          this.loggedInWithoutPassword.delete(account);
+        } else {
+          this.loggedInWithoutPassword.add(account);
+        }
         this.handshakes.set(client, {
           // ssh2 keeps the software part of the server's identification
           // string privately; it publishes no accessor for it.
           serverSoftware: (client as Client & { _remoteVer?: string })._remoteVer,
           negotiated,
-          authMethods: auth.acceptedMethods(),
+          authMethods,
           authKeyAlgorithm: auth.acceptedKeyAlgorithm(),
           compressionRequested: hop.resolved.compression === true,
           agentForwarding: !hop.resolved.forwardAgent ? 'off' : agentSocket ? 'on' : 'no-agent',
@@ -1784,13 +1802,15 @@ interface PasswordCredential {
   existing: boolean;
 }
 
+function hopPasswordAccount(hop: ChainHop): string {
+  return sshPasswordAccount({ user: hop.user, host: hop.resolved.hostname, port: hop.port });
+}
+
 function passwordCredential(hop: ChainHop, vault: PasswordVault | undefined): PasswordCredential {
-  const { user, resolved, port } = hop;
-  const input = { user, host: resolved.hostname, port };
-  const account = sshPasswordAccount(input);
+  const account = hopPasswordAccount(hop);
   return {
     account,
-    label: sshPasswordLabel(input),
+    label: sshPasswordLabel({ user: hop.user, host: hop.resolved.hostname, port: hop.port }),
     existing: vault?.hasSshPassword(account) ?? false,
   };
 }
