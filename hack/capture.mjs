@@ -558,6 +558,101 @@ add('history', async () => {
   await page.close_();
 });
 
+/**
+ * 1Password secrets for the bastion and the Lab fabric switches, and the
+ * bastion logging in with one. Only references are saved, so no 1Password CLI
+ * is needed to seed them.
+ */
+async function seedOnePasswordSecrets() {
+  const status = await api('/api/password-vault');
+  const byName = new Map(status.secrets.map((secret) => [secret.name, secret.id]));
+  for (const [name, username, locator] of [
+    ['bastion-login', 'jump', 'op://Infrastructure/bastion/password'],
+    ['fabric-enable', 'admin', 'op://Network/lab-fabric/enable'],
+    ['fabric-login', 'admin', 'op://Network/lab-fabric/password'],
+  ]) {
+    if (byName.has(name)) continue;
+    const created = await api('/api/password-vault/external-secrets', 'POST', {
+      provider: 'onepassword',
+      name,
+      username,
+      locator,
+    });
+    byName.set(name, created.secret.id);
+  }
+  await api('/api/ssh/config/hosts/bastion/metadata', 'PATCH', { passwordSecretId: byName.get('bastion-login') });
+}
+
+/** The sandbox has no 1Password CLI; answer as one that is installed and signed in. */
+async function fakeOnePasswordCli(page) {
+  await page.route(
+    (url) => url.pathname === '/api/secret-providers',
+    async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      for (const provider of body.providers) {
+        if (provider.descriptor.id !== 'onepassword') continue;
+        provider.status = {
+          available: true,
+          summary: 'Found the 1Password CLI 2.40.0.',
+          detected: { cliPath: '/usr/local/bin/op' },
+        };
+      }
+      await route.fulfill({ response, json: body });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === '/api/secret-providers/onepassword/test',
+    (route) => route.fulfill({ json: { ok: true } }),
+  );
+}
+
+async function openPasswordSettings() {
+  const page = await open({}, seedOnePasswordSecrets);
+  await fakeOnePasswordCli(page);
+  await page.locator('[aria-label="Settings"]').click();
+  await wait(900);
+  await page.getByRole('tab', { name: 'Passwords', exact: true }).click();
+  await wait(1200);
+  return page;
+}
+
+add('1password-settings', async () => {
+  const page = await openPasswordSettings();
+  await page.evaluate(() => {
+    const heading = [...document.querySelectorAll('h3')].find((element) => element.textContent === '1Password');
+    heading?.scrollIntoView({ block: 'start' });
+  });
+  await wait(500);
+  await shot(page, '1password-settings');
+  await page.close_();
+});
+
+add('1password-secret', async () => {
+  const page = await openPasswordSettings();
+  await page.getByRole('button', { name: 'Add from 1Password' }).click();
+  await wait(600);
+  const dialog = page.getByRole('dialog', { name: 'Add 1Password secret' });
+  await dialog.getByLabel('Name', { exact: true }).fill('core-enable');
+  await dialog.getByLabel('Secret reference').fill('op://Network/core-switches/enable');
+  await dialog.getByRole('button', { name: 'Test' }).click();
+  await wait(900);
+  await shot(page, '1password-secret');
+  await page.close_();
+});
+
+add('1password-host-login', async () => {
+  const page = await open({}, seedOnePasswordSecrets);
+  await fakeOnePasswordCli(page);
+  await page.locator('[role="treeitem"][aria-label="bastion"]').first().click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Edit host' }).first().click();
+  await wait(600);
+  await page.getByRole('tab', { name: 'Authentication' }).click();
+  await wait(900);
+  await shot(page, '1password-host-login');
+  await page.close_();
+});
+
 // ---------------------------------------------------------------------------
 
 let failures = 0;

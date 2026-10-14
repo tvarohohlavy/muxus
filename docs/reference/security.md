@@ -170,6 +170,16 @@ When a provider cannot give a value, nothing is typed: an SSH login moves on to 
 saved password or the prompt, a login sequence asks the user to type the value for that
 step (typed into the session and not saved), and **Send secret…** reports why.
 
+[1Password](../guide/1password.md) secrets are read with the 1Password CLI, run without a
+shell as `op read --no-newline [--account <account>] <reference>`, after checking that the
+reference has the `op://vault/item/field` shape and that the account cannot read as a flag.
+The CLI and the 1Password app do the signing in: with app integration, 1Password asks the
+user to approve Muxus. On Windows an approval lasts about ten minutes of inactivity; on
+macOS and Linux 1Password ties it to a terminal session, which the backend does not have,
+so it may ask again for later reads. Muxus looks
+for `op` on `PATH` and in the installers' usual folders; a configured **CLI location** is run
+as it is, so it is trusted configuration, like a `ProxyCommand`.
+
 ### Login passwords from named secrets
 
 A host or folder can name a secret, from the vault or a password manager, to log in with.
