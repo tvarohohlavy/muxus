@@ -133,12 +133,18 @@ describe('OnePasswordProvider', () => {
     const windows = knownLocations('win32', {
       LOCALAPPDATA: 'C:\\Users\\a\\AppData\\Local',
       ProgramFiles: 'C:\\Program Files',
+      ProgramData: 'C:\\ProgramData',
+      USERPROFILE: 'C:\\Users\\a',
     });
     expect(windows).toContain('C:\\Users\\a\\AppData\\Local\\Microsoft\\WinGet\\Links\\op.exe');
     expect(windows).toContain(
       'C:\\Users\\a\\AppData\\Local\\Microsoft\\WinGet\\Packages\\AgileBits.1Password.CLI_Microsoft.Winget.Source_8wekyb3d8bbwe\\op.exe',
     );
+    expect(windows).toContain('C:\\Program Files\\WinGet\\Links\\op.exe');
     expect(windows).toContain('C:\\Program Files\\1Password CLI\\op.exe');
+    // Scoop's manifest makes no shim, and anyone can create a path under ProgramData.
+    expect(windows).toContain('C:\\Users\\a\\scoop\\apps\\1password-cli\\current\\op.exe');
+    expect(windows.filter((candidate) => /chocolatey|ProgramData/i.test(candidate))).toEqual([]);
   });
 
   it('looks for op.exe on the Windows PATH', async () => {
@@ -240,6 +246,26 @@ describe('OnePasswordProvider', () => {
     expect(calls).toBe(1);
   });
 
+  it('names the file when the CLI may not be run, or was stopped by a signal', async () => {
+    const dead = provider(async () => {
+      throw failure('', { code: 'EACCES' });
+    });
+    const notRun = await problemOf(read(dead));
+    expect(notRun.problem).toBe('failed');
+    expect(notRun.message).toBe('Muxus found the 1Password CLI at /usr/bin/op but could not run it.');
+    await expect(dead.status({ settings: {}, refresh: true })).resolves.toMatchObject({
+      available: false,
+      summary: 'Muxus found the 1Password CLI at /usr/bin/op but could not run it.',
+    });
+
+    const killed = provider(async () => {
+      throw Object.assign(new Error('x'), { killed: false, signal: 'SIGKILL', code: null, stderr: '' });
+    });
+    const stopped = await problemOf(read(killed));
+    expect(stopped.problem).toBe('failed');
+    expect(stopped.message).toBe('The 1Password CLI at /usr/bin/op was stopped by SIGKILL before it answered.');
+  });
+
   it('reports a timeout, a field too long, and an empty field', async () => {
     const timedOut = provider(async () => {
       throw failure('', { killed: true, signal: 'SIGTERM', code: null });
@@ -309,6 +335,25 @@ describe('OnePasswordProvider with a real executable', () => {
       available: true,
       summary: `Found the 1Password CLI --version| at ${op}.`,
       detected: { cliPath: op },
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')('tells a configured file it may not run from a missing one', async () => {
+    const op = path.join(directory, 'op');
+    writeFileSync(op, '#!/bin/sh\necho 2.32.0\n');
+    chmodSync(op, 0o644);
+    const onePassword = new OnePasswordProvider({ env: { PATH: '' } });
+    await expect(onePassword.status({ settings: { cliPath: op }, refresh: true })).resolves.toEqual({
+      available: false,
+      summary: `Muxus found the 1Password CLI at ${op} but could not run it.`,
+    });
+    const err = await problemOf(read(onePassword, REFERENCE, { cliPath: op }));
+    expect(err.problem).toBe('failed');
+    expect(err.message).toBe(`Muxus found the 1Password CLI at ${op} but could not run it.`);
+    const gone = path.join(directory, 'missing');
+    await expect(onePassword.status({ settings: { cliPath: gone }, refresh: true })).resolves.toEqual({
+      available: false,
+      summary: `The 1Password CLI was not found at ${gone}.`,
     });
   });
 

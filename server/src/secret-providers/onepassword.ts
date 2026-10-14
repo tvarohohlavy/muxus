@@ -5,8 +5,10 @@ import {
   absolutePathProblem,
   cliFailureProblem,
   clipDetail,
+  failureSignal,
   failureStderr,
   findExecutable,
+  isRegularFile,
   lastErrorLine,
   runCli,
   valueFromStdout,
@@ -135,7 +137,7 @@ export class OnePasswordProvider implements SecretProvider {
     const file = this.locate(configured);
     const detected = file && !configured ? { detected: { cliPath: file } } : {};
     if (!file) {
-      status = { available: false, summary: notInstalledMessage(configured) };
+      status = { available: false, summary: missing(configured).message };
     } else {
       try {
         const { stdout } = await this.run(file, ['--version'], { timeout: VERSION_TIMEOUT_MS });
@@ -146,7 +148,7 @@ export class OnePasswordProvider implements SecretProvider {
           ...detected,
         };
       } catch (err) {
-        status = { available: false, summary: classify(err).message, ...detected };
+        status = { available: false, summary: classify(err, file).message, ...detected };
       }
     }
     this.cachedStatus = { at: Date.now(), cliPath: configured, status };
@@ -157,7 +159,7 @@ export class OnePasswordProvider implements SecretProvider {
   async read(request: SecretReadRequest, context: SecretReadContext): Promise<string> {
     const configured = context.settings.cliPath;
     const file = this.locate(configured);
-    if (!file) throw new SecretProviderError('not-installed', notInstalledMessage(configured));
+    if (!file) throw missing(configured);
     const account = request.options.account;
     const args = ['read', '--no-newline', ...(account ? ['--account', account] : []), request.locator];
     const { signal } = context;
@@ -170,7 +172,7 @@ export class OnePasswordProvider implements SecretProvider {
         return valueFromStdout(stdout);
       } catch (err) {
         if (signal?.aborted) throw cancelled();
-        const problem = classify(err);
+        const problem = classify(err, file);
         if (problem.problem !== 'unreachable' || attempt > 0) throw problem;
       }
       try {
@@ -196,28 +198,26 @@ export class OnePasswordProvider implements SecretProvider {
   }
 }
 
-/** Where the official installers and the common package managers put `op`. */
+/**
+ * Where the official installers and the common package managers put `op`
+ * when PATH does not say. On Windows that is the installer, WinGet (per user
+ * and for the machine) and Scoop; Chocolatey's bin is on PATH already, and
+ * nothing under ProgramData is tried: any local user may create a path there.
+ */
 export function knownLocations(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
   if (platform === 'win32') {
     const join = (...parts: string[]) => path.win32.join(...parts);
     const localAppData = env.LOCALAPPDATA;
     const programFiles = env.ProgramFiles ?? env.PROGRAMFILES;
-    const programData = env.ProgramData ?? env.PROGRAMDATA;
     const userProfile = env.USERPROFILE;
+    const wingetPackage = 'AgileBits.1Password.CLI_Microsoft.Winget.Source_8wekyb3d8bbwe';
     return [
       localAppData && join(localAppData, 'Microsoft', 'WinGet', 'Links', 'op.exe'),
-      localAppData &&
-        join(
-          localAppData,
-          'Microsoft',
-          'WinGet',
-          'Packages',
-          'AgileBits.1Password.CLI_Microsoft.Winget.Source_8wekyb3d8bbwe',
-          'op.exe',
-        ),
+      localAppData && join(localAppData, 'Microsoft', 'WinGet', 'Packages', wingetPackage, 'op.exe'),
+      programFiles && join(programFiles, 'WinGet', 'Links', 'op.exe'),
+      programFiles && join(programFiles, 'WinGet', 'Packages', wingetPackage, 'op.exe'),
       programFiles && join(programFiles, '1Password CLI', 'op.exe'),
-      userProfile && join(userProfile, 'scoop', 'shims', 'op.exe'),
-      programData && join(programData, 'chocolatey', 'bin', 'op.exe'),
+      userProfile && join(userProfile, 'scoop', 'apps', '1password-cli', 'current', 'op.exe'),
     ].filter((candidate): candidate is string => !!candidate);
   }
   if (platform === 'darwin') {
@@ -230,18 +230,36 @@ function cancelled(): SecretProviderError {
   return new SecretProviderError('cancelled', 'Cancelled.');
 }
 
-function notInstalledMessage(configuredPath: string | undefined): string {
-  return configuredPath
-    ? `The 1Password CLI was not found at ${configuredPath}.`
-    : 'The 1Password CLI (op) is not installed, or Muxus cannot find it.';
+/**
+ * Why there is no CLI to run: nothing was found, or the configured path
+ * names a file that may not be run, which is worth saying so the user fixes
+ * the file rather than the path.
+ */
+function missing(configured: string | undefined): SecretProviderError {
+  if (!configured) {
+    return new SecretProviderError(
+      'not-installed',
+      'The 1Password CLI (op) is not installed, or Muxus cannot find it.',
+    );
+  }
+  // The search strips the quotes Explorer's "Copy as path" adds; so does this.
+  const file = configured.trim().replace(/^"(.*)"$/, '$1');
+  if (isRegularFile(file)) return cannotRun(file);
+  return new SecretProviderError('not-installed', `The 1Password CLI was not found at ${file}.`);
 }
 
-/** Turn a failed CLI run into a SecretProviderError with a message for the user. */
-function classify(err: unknown): SecretProviderError {
+function cannotRun(file: string): SecretProviderError {
+  return new SecretProviderError('failed', `Muxus found the 1Password CLI at ${file} but could not run it.`);
+}
+
+/** Turn a failed run of the CLI at `file` into a SecretProviderError with a message for the user. */
+function classify(err: unknown, file: string): SecretProviderError {
   if (err instanceof SecretProviderError) return err;
   switch (cliFailureProblem(err)) {
     case 'not-installed':
-      return new SecretProviderError('not-installed', notInstalledMessage(undefined));
+      return missing(undefined);
+    case 'not-executable':
+      return cannotRun(file);
     case 'cancelled':
       return cancelled();
     case 'timeout':
@@ -253,6 +271,13 @@ function classify(err: unknown): SecretProviderError {
       return new SecretProviderError('failed', 'The 1Password field is too long to type.');
     case undefined:
       break;
+  }
+  const signal = failureSignal(err);
+  if (signal) {
+    return new SecretProviderError(
+      'failed',
+      `The 1Password CLI at ${file} was stopped by ${signal} before it answered.`,
+    );
   }
   const line = errorLine(failureStderr(err));
   const detail = shortDetail(line);

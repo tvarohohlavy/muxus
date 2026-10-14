@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SecretProviderInfo, SecretProvidersResponse, VaultSecretSaveResult } from '@muxus/shared';
 import { buildApp } from '../../../server/src/app.js';
 import { resolveConfig } from '../../../server/src/config.js';
+import { isExecutableFile } from '../../../server/src/secret-providers/cli.js';
+import { OnePasswordProvider } from '../../../server/src/secret-providers/onepassword.js';
 
 const TOKEN = 'onepassword-route-token';
 const VALUE = 'Cisco-Pass-1';
@@ -15,7 +17,9 @@ let scratch: string;
 
 beforeEach(async () => {
   scratch = mkdtempSync(path.join(os.tmpdir(), 'muxus-onepassword-routes-'));
-  // The build's own providers, 1Password among them.
+  // The real provider, but only the test's own op is ever found: the
+  // build's default would run whatever op this machine has on PATH.
+  const fake = path.join(scratch, 'op');
   built = await buildApp(
     resolveConfig({
       token: TOKEN,
@@ -24,6 +28,7 @@ beforeEach(async () => {
       prettyLogs: false,
       staticRoot: '/path/that/does/not/exist',
     }),
+    { secretProviders: [new OnePasswordProvider({ isFile: (file) => file === fake && isExecutableFile(file) })] },
   );
 });
 
