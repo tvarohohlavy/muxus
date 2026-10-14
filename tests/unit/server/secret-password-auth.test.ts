@@ -493,6 +493,26 @@ describe('reading the login password early', () => {
     expect(attempts).toEqual([true]);
   });
 
+  it('keeps reading the password early for a host that logs in with it', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const provider = new FakeSecretProvider({ [LOCATOR]: PASSWORD });
+    const { manager, vault, database } = await setup(port, provider, { vault: false });
+    const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'TACACS', locator: LOCATOR });
+    database.upsertFolderSettings('Lab', { passwordSecretId: secret.id });
+
+    for (const [index, fresh] of ['first', 'second'].entries()) {
+      const io = makeIo();
+      io.earlySecrets = new EarlySecretReads(vault);
+      const connecting = manager.connect(profile, io, 'terminal', { freshTransport: fresh });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(provider.reads).toHaveLength(index + 1);
+      (await connecting).release();
+      io.earlySecrets.close();
+    }
+    expect(attempts).toEqual([true, true]);
+  });
+
   it('stops reading the password early for a host once it has logged in with a key alone', async () => {
     const clientKey = generateKeyPairSync('rsa', {
       modulusLength: 2048,

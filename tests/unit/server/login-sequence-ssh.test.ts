@@ -6,6 +6,7 @@ import { registerTerminalSocket } from '../../../server/src/ws/terminal-socket.j
 import { TerminalInputs } from '../../../server/src/ws/terminal-inputs.js';
 import { MuxusDatabase } from '../../../server/src/persistence/database.js';
 import type { ConnectIo } from '../../../server/src/ssh/connection-manager.js';
+import { EarlySecretReads } from '../../../server/src/security/early-secret-reads.js';
 
 class TestSocket extends EventEmitter {
   readonly OPEN = 1;
@@ -165,11 +166,16 @@ describe('login sequences on SSH sessions', () => {
         },
       });
 
+      const connectedSpy = vi.spyOn(EarlySecretReads.prototype, 'connected');
       // Connecting starts first, so each hop's password is read ahead of the sequence's.
       await vi.waitFor(() => expect(order).toEqual(['connect', 'read']));
       expect(connectShell.mock.calls[0]?.[1]).toHaveProperty('earlySecrets');
+      // The minute for unused values starts only once the shell is up.
+      expect(connectedSpy).not.toHaveBeenCalled();
       connected();
       await vi.waitFor(() => expect(frames().some((frame) => frame.op === 'ready')).toBe(true));
+      expect(connectedSpy).toHaveBeenCalledTimes(1);
+      connectedSpy.mockRestore();
       stream.emit('data', Buffer.from('router>'));
       await vi.waitFor(() =>
         expect(frames().filter((frame) => frame.op === 'login-sequence').at(-1)).toMatchObject({ state: 'done' }),
