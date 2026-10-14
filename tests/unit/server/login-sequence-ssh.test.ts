@@ -5,6 +5,7 @@ import { TERMINAL_SESSION_CLOSE_REASON } from '@muxus/shared/ws-protocol';
 import { registerTerminalSocket } from '../../../server/src/ws/terminal-socket.js';
 import { TerminalInputs } from '../../../server/src/ws/terminal-inputs.js';
 import { MuxusDatabase } from '../../../server/src/persistence/database.js';
+import type { ConnectIo } from '../../../server/src/ssh/connection-manager.js';
 
 class TestSocket extends EventEmitter {
   readonly OPEN = 1;
@@ -33,7 +34,7 @@ function sshSession(
   options: {
     vault?: object;
     /** Settles the shell when called; by default it is ready at once. */
-    connectShell?: (shell: unknown) => Promise<unknown>;
+    connectShell?: (shell: unknown, io: ConnectIo) => Promise<unknown>;
   } = {},
 ) {
   let route!: (socket: TestSocket) => void;
@@ -61,8 +62,8 @@ function sshSession(
     transport: 'new',
     summary: {},
   };
-  const connectShell = vi.fn((..._args: unknown[]) =>
-    options.connectShell ? options.connectShell(shell) : Promise.resolve(shell),
+  const connectShell = vi.fn((...args: unknown[]) =>
+    options.connectShell ? options.connectShell(shell, args[1] as ConnectIo) : Promise.resolve(shell),
   );
   const app = {
     get: (_path: string, _options: unknown, handler: (socket: TestSocket) => void) => {
@@ -178,6 +179,54 @@ describe('login sequences on SSH sessions', () => {
       socket.close(1000, TERMINAL_SESSION_CLOSE_REASON);
     } finally {
       database.close();
+    }
+  });
+
+  it('drops what was read early once the sequence ends, or once connected when there is none', async () => {
+    for (const withSequence of [false, true]) {
+      const database = new MuxusDatabase(':memory:');
+      try {
+        if (withSequence) {
+          const folder = database.upsertFolderSettings('Core', {});
+          database.setFolderLoginSequence(folder.id, {
+            steps: [
+              { id: '1', kind: 'wait', pattern: '>', timeoutSeconds: 5 },
+              { id: '2', kind: 'secret', secretId: 'enable-secret', enter: true },
+            ],
+          });
+          database.updateOpenSshMetadata('router', { group: 'Core' });
+        }
+        const signals: AbortSignal[] = [];
+        const vault = {
+          secrets: () => [],
+          externalSecret: (id: string) => ({ name: id, provider: 'fakevault', providerLabel: 'FakeVault', location: id }),
+          secretValue: vi.fn((_id: string, _master: unknown, options: { signal: AbortSignal }) => {
+            signals.push(options.signal);
+            return Promise.resolve('value');
+          }),
+        };
+        const { socket, stream, frames } = sshSession(database, {
+          vault,
+          // A hop password a key made unnecessary: read, never taken.
+          connectShell: (shell, io) => {
+            io.earlySecrets!.start(['hop-secret']);
+            return Promise.resolve(shell);
+          },
+        });
+        await vi.waitFor(() => expect(frames().some((frame) => frame.op === 'ready')).toBe(true));
+        expect(signals.length).toBeGreaterThan(0);
+        if (withSequence) {
+          expect(signals.every((signal) => signal.aborted)).toBe(false);
+          stream.emit('data', Buffer.from('router>'));
+          await vi.waitFor(() =>
+            expect(frames().filter((frame) => frame.op === 'login-sequence').at(-1)).toMatchObject({ state: 'done' }),
+          );
+        }
+        await vi.waitFor(() => expect(signals.every((signal) => signal.aborted)).toBe(true));
+        socket.close(1000, TERMINAL_SESSION_CLOSE_REASON);
+      } finally {
+        database.close();
+      }
     }
   });
 

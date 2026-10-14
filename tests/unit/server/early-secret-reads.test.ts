@@ -77,6 +77,91 @@ describe('reading secrets early', () => {
     expect(provider.reads).toHaveLength(1);
   });
 
+  it('tries a later read of the same secret when the one taken failed', async () => {
+    const provider = new FakeSecretProvider({ 'fake://a': 'value-a' });
+    provider.nextFailures.push(new SecretProviderError('denied', 'FakeVault did not allow access.'));
+    const { vault, secret } = await setup(provider);
+    const a = secret('fake://a');
+    const early = new EarlySecretReads(vault);
+
+    // One read for a login that a key made unnecessary, one for a sequence step.
+    early.start([a]);
+    early.start([a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(2));
+    await expect(early.read(a, notNow())).resolves.toBe('value-a');
+    early.close();
+  });
+
+  it('reads again when a read failed for a reason that may have passed before anyone needed it', async () => {
+    const provider = new FakeSecretProvider({ 'fake://a': 'value-a' });
+    provider.nextFailures.push(
+      new SecretProviderError('unreachable', 'FakeVault is not running.'),
+      new SecretProviderError('timeout', 'FakeVault did not answer in time.'),
+    );
+    const { vault, secret } = await setup(provider);
+    const a = secret('fake://a');
+    const early = new EarlySecretReads(vault);
+
+    early.start([a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(1));
+    await new Promise((resolve) => setImmediate(resolve));
+    const readNow = vi.fn(() => vault.secretValue(a));
+    await expect(early.read(a, readNow)).rejects.toMatchObject({ problem: 'timeout' });
+    expect(readNow).toHaveBeenCalledTimes(1);
+
+    // A failure the use itself waited through is its answer.
+    provider.nextFailures.push(new SecretProviderError('timeout', 'FakeVault did not answer in time.'));
+    early.start([a]);
+    await expect(early.read(a, notNow())).rejects.toMatchObject({ problem: 'timeout' });
+    expect(provider.reads).toHaveLength(3);
+  });
+
+  it('reads again when the secret was deleted or pointed elsewhere since the read started', async () => {
+    const provider = new FakeSecretProvider({ 'fake://a': 'value-a', 'fake://b': 'value-b' });
+    const { vault, secret } = await setup(provider);
+    const a = secret('fake://a');
+    const early = new EarlySecretReads(vault);
+
+    early.start([a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(1));
+    vault.updateExternalSecret(a, { provider: 'fakevault', name: 'renamed', locator: 'fake://b' });
+    await expect(early.read(a, () => vault.secretValue(a))).resolves.toBe('value-b');
+
+    // A rename alone keeps the read.
+    early.start([a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(3));
+    vault.updateExternalSecret(a, { provider: 'fakevault', name: 'renamed again', locator: 'fake://b' });
+    await expect(early.read(a, notNow())).resolves.toBe('value-b');
+
+    early.start([a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(4));
+    vault.deleteCredential(a);
+    await expect(early.read(a, () => vault.secretValue(a))).resolves.toBeUndefined();
+  });
+
+  it('reads one secret at a time per manager for each session, so every session’s first secret comes first', async () => {
+    const provider = new FakeSecretProvider({ 'fake://x1': 'x1', 'fake://y1': 'y1', 'fake://x2': 'x2', 'fake://y2': 'y2' });
+    const open = gated(provider);
+    const { vault, secret } = await setup(provider);
+    const x1 = secret('fake://x1');
+    const y1 = secret('fake://y1');
+    const x2 = secret('fake://x2');
+    const y2 = secret('fake://y2');
+    const first = new EarlySecretReads(vault);
+    const second = new EarlySecretReads(vault);
+
+    first.start([x1]);
+    first.start([y1]);
+    second.start([x2]);
+    second.start([y2]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(1));
+    open();
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(4));
+    expect(provider.reads.map((read) => read.locator)).toEqual(['fake://x1', 'fake://x2', 'fake://y1', 'fake://y2']);
+    first.close();
+    second.close();
+  });
+
   it('reads again at the moment of use when the provider wanted to ask the user something', async () => {
     const provider = new FakeSecretProvider({ 'fake://a': 'value-a' });
     provider.passphrase = 'open sesame';
@@ -89,15 +174,28 @@ describe('reading secrets early', () => {
     await expect(early.read(a, () => vault.secretValue(a, undefined, { ask }))).resolves.toBe('value-a');
     expect(ask).toHaveBeenCalledTimes(1);
     expect(provider.reads).toHaveLength(2);
+
+    // Also when the provider carried on without an answer.
+    provider.skippedValue = 'a default';
+    early.start([a]);
+    await expect(early.read(a, () => vault.secretValue(a, undefined, { ask }))).resolves.toBe('value-a');
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(provider.reads).toHaveLength(4);
   });
 
-  it('drops a value nobody took in time', async () => {
+  it('drops a value nobody took within the time, counted once the session is connected', async () => {
     const provider = new FakeSecretProvider({ 'fake://a': 'value-a' });
     const { vault, secret } = await setup(provider);
     const a = secret('fake://a');
     const early = new EarlySecretReads(vault, { keepMs: 20 });
 
-    early.start([a]);
+    early.start([a, a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(2));
+    // Still connecting (a jump host's prompt can take a while): kept.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await expect(early.read(a, notNow())).resolves.toBe('value-a');
+
+    early.connected();
     await new Promise((resolve) => setTimeout(resolve, 80));
     const readNow = vi.fn(() => Promise.resolve('fresh'));
     await expect(early.read(a, readNow)).resolves.toBe('fresh');

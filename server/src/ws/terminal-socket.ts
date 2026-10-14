@@ -638,6 +638,7 @@ async function handleSession(
       transport.close();
       return;
     }
+    earlySecrets.connected();
     attachTerminalTransport(
       socket,
       control,
@@ -670,6 +671,7 @@ async function handleSession(
       transport.close();
       return;
     }
+    earlySecrets.connected();
     attachTerminalTransport(
       socket,
       control,
@@ -695,7 +697,7 @@ async function handleSession(
     return alias ? { alias } : undefined;
   });
   // Connecting starts reading each hop's password; the sequence's secrets
-  // queue behind them, in the order the session needs them.
+  // follow them, in the order the session needs them.
   const shell = ctx.connections.connectShell(
     profile,
     io,
@@ -706,6 +708,7 @@ async function handleSession(
   );
   readSequenceSecretsEarly(sshSequence);
   const { lease: terminalLease, stream, transport, summary } = await shell;
+  earlySecrets.connected();
   const conn = terminalLease.connection;
   // Session forwards belong to the terminal sessions using this transport;
   // stop them when the last terminal/dial lease leaves. Saved/manual tunnels

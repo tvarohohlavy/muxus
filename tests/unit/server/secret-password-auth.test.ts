@@ -3,7 +3,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
-import { Server } from 'ssh2';
+import { Server, utils } from 'ssh2';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AuthPromptInfo, SshProfile } from '@muxus/shared/ws-protocol';
 import { MuxusDatabase } from '../../../server/src/persistence/database.js';
@@ -49,9 +49,15 @@ afterAll(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-/** Password-only sshd stand-in that records each password attempt. */
-function startServer(): Promise<{ server: Server; port: number; attempts: boolean[] }> {
+/**
+ * sshd stand-in that records each password attempt. It takes the password,
+ * and also `clientKey` when one is given.
+ */
+function startServer(
+  clientKey?: string,
+): Promise<{ server: Server; port: number; attempts: boolean[] }> {
   const attempts: boolean[] = [];
+  const allowed = clientKey ? (utils.parseKey(clientKey) as ReturnType<typeof utils.parseKey> & { type: string }) : undefined;
   const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
     conn.on('error', () => undefined);
     conn.on('authentication', (ctx) => {
@@ -59,7 +65,17 @@ function startServer(): Promise<{ server: Server; port: number; attempts: boolea
         attempts.push(ctx.password === PASSWORD);
         if (ctx.password === PASSWORD) return ctx.accept();
       }
-      ctx.reject(['password']);
+      if (
+        ctx.method === 'publickey' &&
+        allowed &&
+        !(allowed instanceof Error) &&
+        ctx.key.algo === allowed.type &&
+        ctx.key.data.equals(allowed.getPublicSSH())
+      ) {
+        if (ctx.signature && allowed.verify(ctx.blob!, ctx.signature, ctx.hashAlgo) !== true) return ctx.reject();
+        return ctx.accept();
+      }
+      ctx.reject(allowed ? ['publickey', 'password'] : ['password']);
     });
     conn.on('ready', () => {
       conn.on('session', (acceptSession) => {
@@ -85,13 +101,21 @@ afterEach(() => {
 async function setup(
   port: number,
   provider: FakeSecretProvider,
-  options: { vault?: boolean; hosts?: Array<{ alias: string; user: string }> } = {},
+  options: { vault?: boolean; hosts?: Array<{ alias: string; user: string; lines?: string[] }> } = {},
 ): Promise<{ manager: SshConnectionManager; vault: PasswordVault; database: MuxusDatabase }> {
   const configFile = path.join(tmp, `ssh_config-${counter++}`);
   writeFileSync(
     configFile,
     (options.hosts ?? [{ alias: 'lab', user: 'tester' }])
-      .flatMap(({ alias, user }) => [`Host ${alias}`, '  HostName 127.0.0.1', `  User ${user}`, `  Port ${port}`, '  StrictHostKeyChecking no', ''])
+      .flatMap(({ alias, user, lines = [] }) => [
+        `Host ${alias}`,
+        '  HostName 127.0.0.1',
+        `  User ${user}`,
+        `  Port ${port}`,
+        '  StrictHostKeyChecking no',
+        ...lines.map((line) => `  ${line}`),
+        '',
+      ])
       .join('\n'),
   );
   const database = new MuxusDatabase(':memory:');
@@ -467,6 +491,42 @@ describe('reading the login password early', () => {
     expect(io.statuses).toContain('FakeVault could not provide “core-sw1 login”: FakeVault did not allow access.');
     expect(io.prompts).toBe(0);
     expect(attempts).toEqual([true]);
+  });
+
+  it('stops reading the password early for a host once it has logged in with a key alone', async () => {
+    const clientKey = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    }).privateKey;
+    const keyFile = path.join(tmp, `client-key-${counter++}`);
+    writeFileSync(keyFile, clientKey, { mode: 0o600 });
+    const { server, port, attempts } = await startServer(clientKey);
+    cleanups.push(() => server.close());
+    const provider = new FakeSecretProvider({ [LOCATOR]: PASSWORD });
+    const { manager, vault, database } = await setup(port, provider, {
+      vault: false,
+      hosts: [{ alias: 'lab', user: 'tester', lines: [`IdentityFile ${keyFile}`, 'IdentitiesOnly yes'] }],
+    });
+    // A folder password every host in it falls back to.
+    const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'TACACS', locator: LOCATOR });
+    database.upsertFolderSettings('Lab', { passwordSecretId: secret.id });
+
+    const open = async (fresh: string) => {
+      const io = makeIo();
+      io.earlySecrets = new EarlySecretReads(vault);
+      const lease = await manager.connect(profile, io, 'terminal', { freshTransport: fresh });
+      lease.release();
+      io.earlySecrets.close();
+      return io;
+    };
+    // The first time, nobody knows the key will do.
+    await open('first');
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(1));
+    await open('second');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(provider.reads).toHaveLength(1);
+    expect(attempts).toEqual([]);
   });
 
   it('reads nothing early when the first password to try is not in a password manager', async () => {

@@ -580,16 +580,25 @@ export class PasswordVault {
   }
 
   /**
-   * Set when a password manager holds the secret's value: its name, and the
-   * manager's ID and name for messages. Such a secret needs no master password.
+   * Set when a password manager holds the secret's value: its name, the
+   * manager's ID and name for messages, and where the manager keeps it (one
+   * string that changes when the secret is pointed at another item). Such a
+   * secret needs no master password.
    */
-  externalSecret(id: string): { name: string; provider: string; providerLabel: string } | undefined {
+  externalSecret(
+    id: string,
+  ): { name: string; provider: string; providerLabel: string; location: string } | undefined {
     const record = this.externalRecord(id);
     if (!record) return undefined;
     return {
       name: record.label ?? 'Secret',
       provider: record.provider,
       providerLabel: this.providers.label(record.provider),
+      location: JSON.stringify([
+        record.provider,
+        record.locator,
+        Object.entries(record.options).sort(([a], [b]) => a.localeCompare(b)),
+      ]),
     };
   }
 
