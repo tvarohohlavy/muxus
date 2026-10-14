@@ -132,8 +132,10 @@ automatically when a host falls back to password login; a password remembered fo
 host itself still wins. **Password from a secret** picks a
 [named secret](settings.md#passwords) instead. It is tried before the folder's shared
 password, and a host's own [login password](adding-hosts.md#authentication) still comes
-first. A secret in a password manager is read as a tab to a host in the folder opens, even
-for a host that logs in with a key, until that host has once logged in with a key alone.
+first. When the folder's secret is the first password a host would try and a password
+manager holds it, it is read as the tab opens, even if a key then logs in; while the host's
+last login since Muxus started needed no password, it is read only when the server asks for
+one.
 Folder credentials move with the folder when it is renamed or dragged, and deleting the
 folder deletes them.
 

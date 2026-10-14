@@ -152,14 +152,15 @@ would try, when a password manager holds it, and the secrets the host's login se
 types. These reads run while the connection is made, each serves one use, and a value read
 early stays only in the backend's memory. It is dropped once used, when the login sequence
 ends (or, without one, once the connection is up), when the tab closes, or when nobody took
-it within a minute of the connection being up. A session reads one secret at a time from
-each manager, so when several tabs open together, every tab's login password is read before
-any tab's sequence secrets.
+it within a minute of the connection being up or of the read finishing, whichever is later.
+A session reads one secret at a time from each manager, so when several tabs open together,
+every tab's first secret from a manager (usually its login password) is read before any
+tab's second.
 
 The manager's approval prompt therefore appears as the tab opens, and a read is wasted when
-a key logs in or the sequence stops before its step. A host whose last login since Muxus
-started took no password (a key alone) has its password read only when the server asks for
-it. A value read early is not used, and the secret is read again when needed, when the
+a key logs in or the sequence stops before its step. While a host's last login since Muxus
+started needed no password (a key was enough), its password is read only when the server
+asks for one. A value read early is not used, and the secret is read again when needed, when the
 provider wanted to ask the user something (so the question appears there), when the secret
 was deleted or pointed at another item since, or when the read failed because the manager
 was locked, not running or did not answer before anyone needed the value. Nothing is read

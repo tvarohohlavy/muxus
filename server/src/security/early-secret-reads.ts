@@ -11,6 +11,9 @@ const NOBODY_TO_ASK: AuthPromptResponse = { answers: [], skipped: true };
 /** Failures that may be gone by the time the value is needed: the manager was busy, closed or locked. */
 const PASSING_PROBLEMS: ReadonlySet<SecretProviderProblem> = new Set(['timeout', 'unreachable', 'locked']);
 
+/** An early read not made: the secret moved while the read waited its turn. */
+class SecretMoved extends Error {}
+
 interface EarlyRead {
   readonly value: Promise<string | undefined>;
   /** Where the manager kept the secret when the read started. */
@@ -29,12 +32,13 @@ interface EarlyRead {
  *
  * Each read started serves one use. A value stays only in memory and is
  * dropped once used, when the reads are closed, or when nobody took it
- * within a minute of the session connecting. Vault secrets are not read
- * early: they decrypt at once and may need the master password.
+ * within a minute of the session connecting or of the read finishing,
+ * whichever is later. Vault secrets are not read early: they decrypt at
+ * once and may need the master password.
  *
  * A session reads one secret at a time from each manager, so when several
- * sessions open together, every session's first secret (its login
- * password) is read before any session's second.
+ * sessions open together, every session's first secret from a manager
+ * (usually its login password) is read before any session's second.
  *
  * An early read is not used, and the secret is read again when needed,
  * when the provider wanted to ask the user something (nobody could answer
@@ -72,15 +76,17 @@ export class EarlySecretReads {
       const external = this.vault.externalSecret(id);
       if (!external) continue;
       let asked = false;
-      const value = (this.tails.get(external.provider) ?? Promise.resolve()).then(() =>
-        this.vault.secretValue(id, undefined, {
+      const value = (this.tails.get(external.provider) ?? Promise.resolve()).then(() => {
+        // The vault looks the secret up again, in this same turn, to read it.
+        if (this.vault.externalSecret(id)?.location !== external.location) throw new SecretMoved();
+        return this.vault.secretValue(id, undefined, {
           signal: this.controller.signal,
           ask: async () => {
             asked = true;
             return NOBODY_TO_ASK;
           },
-        }),
-      );
+        });
+      });
       this.tails.set(external.provider, value.then(ignore, ignore));
       const read: EarlyRead = { value, location: external.location, asked: () => asked, settled: false };
       const queue = this.reads.get(id);
@@ -124,12 +130,17 @@ export class EarlySecretReads {
       try {
         value = await abortable(early.value, signal);
       } catch (err) {
+        if (err instanceof SecretMoved) {
+          if (this.stopped(signal)) throw cancelled();
+          continue;
+        }
         if (this.stopped(signal)) throw err;
+        if (early.asked()) return readNow();
         // Another early read of this secret may have got the value.
         if (this.reads.has(secretId)) continue;
         const passed =
           settledBeforeUse && err instanceof SecretProviderError && PASSING_PROBLEMS.has(err.problem);
-        if (early.asked() || passed) return readNow();
+        if (passed) return readNow();
         throw err;
       }
       if (!early.asked()) return value;

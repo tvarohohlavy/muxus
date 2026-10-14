@@ -66,8 +66,8 @@ server asks for a password. It comes before a password remembered for the host a
 the folder's. When it is unavailable, the next password Muxus knows is tried; when the
 server refuses it, you are asked. Only the secret's ID is kept, in the Muxus database and
 never in `ssh_config`. A secret in a password manager is read as the tab opens, while the
-connection is made, even if a key then logs in; once a host has logged in with a key alone,
-Muxus reads its password only when the server asks for one, until Muxus restarts.
+connection is made, even if a key then logs in. While the host's last login since Muxus
+started needed no password, Muxus reads it only when the server asks for one.
 
 ## Connection route
 

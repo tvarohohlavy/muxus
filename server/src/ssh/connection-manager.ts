@@ -358,7 +358,7 @@ export class SshConnectionManager {
   >();
   /** Dial plans whose optional integration setup killed the remote transport; reset on app restart. */
   private readonly automaticPlainShellKeys = new Set<string>();
-  /** Hosts (as user@host:port) whose last login took no password; reset on app restart. */
+  /** Hosts (as user@host:port) whose last login needed no password; reset on app restart. */
   private readonly loggedInWithoutPassword = new Set<string>();
   private readonly loadConfig: () => ConfigDocument;
   private readonly vault: PasswordVault | undefined;
@@ -870,8 +870,8 @@ export class SshConnectionManager {
     reused?.retain();
     if (reuseJumpHops && this.vault && io.earlySecrets) {
       // Each hop's password from a password manager is read while the hops
-      // connect, rather than once the server asks for it. A host that last
-      // logged in with a key alone will most likely do so again.
+      // connect, rather than once the server asks for it. A host whose last
+      // login needed no password (a key did) will most likely do so again.
       const vault = this.vault;
       io.earlySecrets.start(
         chain
@@ -1282,11 +1282,8 @@ export class SshConnectionManager {
         settled = true;
         const authMethods = auth.acceptedMethods();
         const account = hopPasswordAccount(hop);
-        if (authMethods.some((method) => method === 'password' || method === 'keyboard-interactive')) {
-          this.loggedInWithoutPassword.delete(account);
-        } else {
-          this.loggedInWithoutPassword.add(account);
-        }
+        if (auth.neededPassword) this.loggedInWithoutPassword.delete(account);
+        else this.loggedInWithoutPassword.add(account);
         this.handshakes.set(client, {
           // ssh2 keeps the software part of the server's identification
           // string privately; it publishes no accessor for it.
@@ -1948,6 +1945,8 @@ class AuthLadder {
   private savedPasswordAttempted = false;
   /** The named secret tried last as this hop's password; unset when a saved password was. */
   private triedSecretName: string | undefined;
+  /** The server asked for the password, as a password or as a keyboard-interactive password prompt. */
+  neededPassword = false;
   private retryKeyboardInteractive = false;
   /** The method last offered to the server, and those it partially accepted. */
   private lastMethod: AuthenticationType | undefined;
@@ -2238,6 +2237,7 @@ class AuthLadder {
     attempt: number,
     promptLabel: string,
   ): Promise<AnyAuthMethod> {
+    this.neededPassword = true;
     const { user } = this.hop;
     const credential = this.passwordCredential();
     const saved = await this.availableSavedPassword(credential, promptLabel);
@@ -2310,6 +2310,7 @@ class AuthLadder {
     }
 
     this.retryKeyboardInteractive = true;
+    this.neededPassword = true;
     const credential = this.passwordCredential();
     const saved = await this.availableSavedPassword(credential, promptLabel);
     if (saved !== undefined) return [saved];

@@ -139,6 +139,24 @@ describe('reading secrets early', () => {
     await expect(early.read(a, () => vault.secretValue(a))).resolves.toBeUndefined();
   });
 
+  it('does not read a secret that moved while its read waited its turn, even if it moved back', async () => {
+    const provider = new FakeSecretProvider({ 'fake://x': 'x', 'fake://a': 'value-a', 'fake://b': 'value-b' });
+    const open = gated(provider);
+    const { vault, secret } = await setup(provider);
+    const x = secret('fake://x');
+    const a = secret('fake://a');
+    const early = new EarlySecretReads(vault);
+
+    early.start([x, a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(1));
+    vault.updateExternalSecret(a, { provider: 'fakevault', name: 'a', locator: 'fake://b' });
+    open();
+    await expect(early.read(x, notNow())).resolves.toBe('x');
+    vault.updateExternalSecret(a, { provider: 'fakevault', name: 'a', locator: 'fake://a' });
+    await expect(early.read(a, () => vault.secretValue(a))).resolves.toBe('value-a');
+    expect(provider.reads.map((read) => read.locator)).toEqual(['fake://x', 'fake://a']);
+  });
+
   it('reads one secret at a time per manager for each session, so every session’s first secret comes first', async () => {
     const provider = new FakeSecretProvider({ 'fake://x1': 'x1', 'fake://y1': 'y1', 'fake://x2': 'x2', 'fake://y2': 'y2' });
     const open = gated(provider);
@@ -181,6 +199,28 @@ describe('reading secrets early', () => {
     await expect(early.read(a, () => vault.secretValue(a, undefined, { ask }))).resolves.toBe('value-a');
     expect(ask).toHaveBeenCalledTimes(2);
     expect(provider.reads).toHaveLength(4);
+  });
+
+  it('asks at once, without waiting for or using up a later early read of the same secret', async () => {
+    const provider = new FakeSecretProvider({ 'fake://a': 'value-a' });
+    provider.passphrase = 'open sesame';
+    const { vault, secret } = await setup(provider);
+    const a = secret('fake://a');
+    const early = new EarlySecretReads(vault);
+
+    early.start([a]);
+    await vi.waitFor(() => expect(provider.reads).toHaveLength(1));
+    // The second early read is held back by the manager.
+    const open = gated(provider);
+    early.start([a]);
+    const readNow = vi.fn(() => Promise.resolve('answered'));
+    await expect(early.read(a, readNow)).resolves.toBe('answered');
+    expect(readNow).toHaveBeenCalledTimes(1);
+    open();
+    // The held read is still there for the next use, which asks in turn.
+    await expect(early.read(a, readNow)).resolves.toBe('answered');
+    expect(readNow).toHaveBeenCalledTimes(2);
+    expect(provider.reads).toHaveLength(2);
   });
 
   it('drops a value nobody took within the time, counted once the session is connected', async () => {
