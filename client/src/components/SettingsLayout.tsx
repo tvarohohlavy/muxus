@@ -246,7 +246,8 @@ export function StatusText({ tone, children }: { tone: StatusTone; children: Rea
       }}
     >
       <Icon sx={{ fontSize: 15, mt: '1px', flexShrink: 0 }} />
-      <span>{children}</span>
+      {/* A path or URL in a status has no spaces to wrap at; break it rather than overflow. */}
+      <span style={{ overflowWrap: 'anywhere' }}>{children}</span>
     </Box>
   );
 }
