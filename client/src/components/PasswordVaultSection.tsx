@@ -44,6 +44,7 @@ import {
 } from '../api/password-vault.js';
 import { usePasswordVaultStatus, useSecretProviders } from '../api/password-vault-queries.js';
 import { fetchSecretProviders, saveSecretProviderSettings } from '../api/secret-providers.js';
+import { middleEllipsis } from '../middle-ellipsis.js';
 import { confirmAction } from '../state/dialogs.js';
 import { usePrefsStore } from '../state/prefs.js';
 import { showErrorToast, showToast } from '../state/toast.js';
@@ -580,11 +581,34 @@ function SecretProviderGroup({ provider }: { provider: SecretProviderInfo }) {
         text: `${status.summary} Logins that need a ${descriptor.label} secret ask you to type it instead.`,
       };
 
+  // What the provider found on its own, such as where its CLI is: often a
+  // long path, so it is shortened in the middle and shown whole on hover.
+  const detected = descriptor.settings.flatMap((field) => {
+    const value = status.detected?.[field.key];
+    return value ? [{ label: field.label, value, shown: middleEllipsis(value) }] : [];
+  });
+
   return (
     <SettingsGroup title={descriptor.label} description={descriptor.description}>
       <SettingRow
         label="Status"
-        description={<StatusText tone={state.tone}>{state.text}</StatusText>}
+        description={
+          <>
+            <StatusText tone={state.tone}>{state.text}</StatusText>
+            {detected.map((item) => (
+              <Tooltip
+                key={item.label}
+                title={item.shown === item.value ? '' : item.value}
+                placement="bottom-start"
+                disableInteractive
+              >
+                <Typography variant="caption" component="div" noWrap sx={{ color: 'text.secondary' }}>
+                  {item.label}: {item.shown}
+                </Typography>
+              </Tooltip>
+            ))}
+          </>
+        }
         control={
           <Button variant="outlined" disabled={busy} onClick={() => void checkAgain()}>
             Check again
@@ -595,6 +619,7 @@ function SecretProviderGroup({ provider }: { provider: SecretProviderInfo }) {
         const id = `settings-${descriptor.id}-${field.key}`;
         const saved = settings[field.key] ?? '';
         const shown = drafts[field.key] ?? saved;
+        const placeholder = status.detected?.[field.key] ?? field.placeholder;
         return (
           <SettingRow key={field.key} label={field.label} labelFor={id} description={field.help} stacked>
             <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
@@ -602,12 +627,13 @@ function SecretProviderGroup({ provider }: { provider: SecretProviderInfo }) {
                 id={id}
                 size="small"
                 fullWidth
-                placeholder={status.detected?.[field.key] ?? field.placeholder}
+                placeholder={placeholder}
                 value={shown}
                 onChange={(event) =>
                   setDrafts((current) => ({ ...current, [field.key]: event.target.value }))
                 }
-                slotProps={{ htmlInput: { spellCheck: false } }}
+                // A found path rarely fits the field; hovering shows all of it.
+                slotProps={{ htmlInput: { spellCheck: false, title: shown || placeholder } }}
               />
               <Button
                 variant="outlined"
