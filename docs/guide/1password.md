@@ -95,7 +95,10 @@ A typical switch or router asks for a login password, then an `enable` password:
    `op://Network/core-sw1/enable`.
 2. In the host editor's **Authentication** section, choose **core-sw1 login** as the
    **Login password**. To use one password for a whole folder of devices, choose it under
-   **Password from a secret** in the folder's **Shared SSH credentials** instead.
+   **Password from a secret** in the folder's **Shared SSH credentials** instead. Muxus then
+   reads it as a tab to any host in the folder opens, even one that logs in with a key, until
+   that host has once logged in with a key alone; hosts that use keys are better kept in
+   another folder.
 3. In the **Login sequence** section, add these steps:
 
     | Step | Value |
