@@ -83,6 +83,7 @@ import {
   sshPasswordLabel,
 } from '../security/password-vault.js';
 import { VaultKeyStoreUnavailableError } from '../security/vault-key-store.js';
+import type { EarlySecretReads } from '../security/early-secret-reads.js';
 import { SecretProviderError, type SecretProviderProblem } from '../secret-providers/provider.js';
 import {
   expandIdentityPath,
@@ -112,6 +113,8 @@ export interface HostKeyChallenge {
 export interface ConnectIo {
   /** Aborted when the session that asked goes away; a provider read stops waiting. */
   signal?: AbortSignal;
+  /** The session's password-manager reads started ahead of time; a login takes its value there. */
+  earlySecrets?: EarlySecretReads;
   status(message: string, options?: { transient?: boolean }): void;
   /** Ask the user to answer auth prompts (password, 2FA, key passphrase). */
   prompt(info: AuthPromptInfo): Promise<AuthPromptResponse>;
@@ -863,6 +866,12 @@ export class SshConnectionManager {
     }
     const reused = route;
     reused?.retain();
+    if (reuseJumpHops && this.vault && io.earlySecrets) {
+      // Each hop's password from a password manager is read while the hops
+      // connect, rather than once the server asks for it.
+      const vault = this.vault;
+      io.earlySecrets.start(chain.slice(first).flatMap((hop) => firstManagerPassword(hop, vault) ?? []));
+    }
     const postAuth: Promise<void>[] = [];
     let dialed: Client | undefined;
     try {
@@ -1775,6 +1784,41 @@ interface PasswordCredential {
   existing: boolean;
 }
 
+function passwordCredential(hop: ChainHop, vault: PasswordVault | undefined): PasswordCredential {
+  const { user, resolved, port } = hop;
+  const input = { user, host: resolved.hostname, port };
+  const account = sshPasswordAccount(input);
+  return {
+    account,
+    label: sshPasswordLabel(input),
+    existing: vault?.hasSshPassword(account) ?? false,
+  };
+}
+
+/**
+ * The saved passwords and named secrets a hop logs in with before asking,
+ * in order. The host's own named secret wins, then its saved password;
+ * folder passwords are the shared default the host falls back to, nearest
+ * folder first, each folder's secret before its saved password.
+ */
+function passwordSources(hop: ChainHop, credential: PasswordCredential): FolderPasswordRef[] {
+  return [
+    ...(hop.passwordSecretId ? [{ secretId: hop.passwordSecretId, label: credential.label }] : []),
+    ...(credential.existing ? [{ account: credential.account, label: credential.label }] : []),
+    ...(hop.folderPasswords ?? []),
+  ];
+}
+
+/** The secret a hop's login tries first, when a password manager holds it. */
+function firstManagerPassword(hop: ChainHop, vault: PasswordVault): string | undefined {
+  const { passwordAuthentication, kbdInteractiveAuthentication } = hop.resolved;
+  if (passwordAuthentication === false && kbdInteractiveAuthentication === false) return undefined;
+  const first = passwordSources(hop, passwordCredential(hop, vault)).find((source) =>
+    'secretId' in source ? vault.hasSecret(source.secretId) : vault.hasSshPassword(source.account),
+  );
+  return first && 'secretId' in first && vault.externalSecret(first.secretId) ? first.secretId : undefined;
+}
+
 /**
  * Keyboard-interactive is also used for OTPs and arbitrary challenges. Only
  * treat an unambiguous, single hidden password field as an SSH password.
@@ -2283,14 +2327,7 @@ class AuthLadder {
   }
 
   private passwordCredential(): PasswordCredential {
-    const { user, resolved, port } = this.hop;
-    const input = { user, host: resolved.hostname, port };
-    const account = sshPasswordAccount(input);
-    return {
-      account,
-      label: sshPasswordLabel(input),
-      existing: this.vault?.hasSshPassword(account) ?? false,
-    };
+    return passwordCredential(this.hop, this.vault);
   }
 
   private async availableSavedPassword(
@@ -2299,16 +2336,7 @@ class AuthLadder {
   ): Promise<string | undefined> {
     if (this.savedPasswordAttempted || !this.vault) return undefined;
     const vault = this.vault;
-    // The host's own named secret wins, then its saved password; folder
-    // passwords are the shared default the host falls back to, nearest
-    // folder first, each folder's secret before its saved password.
-    const sources: FolderPasswordRef[] = [
-      ...(this.hop.passwordSecretId
-        ? [{ secretId: this.hop.passwordSecretId, label: credential.label }]
-        : []),
-      ...(credential.existing ? [{ account: credential.account, label: credential.label }] : []),
-      ...(this.hop.folderPasswords ?? []),
-    ];
+    const sources = passwordSources(this.hop, credential);
     // A host and its folder may name the same secret: one read, one approval.
     // A manager that is missing, locked or not answering fails every secret
     // it holds, so its later candidates are not asked again.
@@ -2365,13 +2393,17 @@ class AuthLadder {
       this.io.status(`Asking ${providerLabel} for “${name}” to log in to ${label} …`, {
         transient: true,
       });
+      const readNow = () =>
+        vault.secretValue(secretId, undefined, {
+          signal: this.io.signal,
+          ask: (prompt) => this.io.prompt({ host: promptLabel, ...prompt }),
+        });
       try {
         // Approving in the password manager is the user's time, like a prompt.
         const value = await this.runInteraction(() =>
-          vault.secretValue(secretId, undefined, {
-            signal: this.io.signal,
-            ask: (prompt) => this.io.prompt({ host: promptLabel, ...prompt }),
-          }),
+          this.io.earlySecrets
+            ? this.io.earlySecrets.read(secretId, readNow, this.io.signal)
+            : readNow(),
         );
         if (value !== undefined) {
           this.io.status(`Using “${name}” from ${providerLabel} for ${label}.`, { transient: true });

@@ -403,6 +403,23 @@ describe('login sequences on a live session', () => {
     expect(appLogs.raw).not.toContain(SECRET);
   });
 
+  it('reads a password manager’s secret as the session opens, and types that read', async () => {
+    let open!: () => void;
+    provider.gate = new Promise((resolve) => (open = resolve));
+    const secretId = await createExternalSecret('fake://network/core-sw1');
+    const host = await telnetHost({ loginSequence: loginSteps(secretId) });
+    const session = await connect(host);
+    // Asked for before the console even printed its banner.
+    expect(provider.reads).toHaveLength(1);
+    await vi.waitFor(() => expect(session.sequence().at(-1)).toMatchObject({ state: 'running', step: 6 }), {
+      timeout: 10_000,
+    });
+    open();
+    await vi.waitFor(() => expect(session.sequence().at(-1)?.state).toBe('done'));
+    await vi.waitFor(() => expect(session.output()).toContain('core-sw1>'));
+    expect(provider.reads).toHaveLength(1);
+  });
+
   it('lets the password manager ask over the session’s own prompt', async () => {
     provider.passphrase = 'open sesame';
     const secretId = await createExternalSecret('fake://network/core-sw1');

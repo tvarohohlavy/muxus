@@ -146,6 +146,17 @@ provider run one at a time, so several sessions opening together do not all ask 
 provider may also ask the user a question, such as a passphrase, in the session's own
 prompt; the answer is not saved.
 
+A manager can take a second or more to answer, so when a terminal session opens, the backend
+starts reading the secrets its login will need: the first password each SSH hop it dials
+would try, when a password manager holds it, and the secrets the host's login sequence
+types. These reads run while the connection is made, each serves one use, and a value read
+early stays only in the backend's memory. It is dropped once used, when the login sequence
+ends (or, without one, once the connection is up), when the tab closes, or after a minute.
+The manager's approval prompt therefore appears as the tab opens, and a read is wasted when
+a key logs in or the sequence stops before its step. A read whose provider wanted to ask
+the user something is made again when the value is needed, so the question appears there.
+Nothing is read early for **Send secret…** or command buttons, or from the vault.
+
 When a provider cannot give a value, nothing is typed: an SSH login moves on to the next
 saved password or the prompt, a login sequence asks the user to type the value for that
 step (typed into the session and not saved), and **Send secret…** reports why.

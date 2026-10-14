@@ -28,7 +28,14 @@ const enable: LoginSequence = {
 };
 
 /** An SSH shell session on a mocked transport, for the alias `router` in the folder `Core`. */
-function sshSession(database: MuxusDatabase) {
+function sshSession(
+  database: MuxusDatabase,
+  options: {
+    vault?: object;
+    /** Settles the shell when called; by default it is ready at once. */
+    connectShell?: (shell: unknown) => Promise<unknown>;
+  } = {},
+) {
   let route!: (socket: TestSocket) => void;
   const stream = Object.assign(new EventEmitter(), {
     close: vi.fn(),
@@ -37,7 +44,7 @@ function sshSession(database: MuxusDatabase) {
     pause: vi.fn(),
     resume: vi.fn(),
   });
-  const connectShell = vi.fn().mockResolvedValue({
+  const shell = {
     lease: {
       connection: {
         id: 'connection-1',
@@ -53,7 +60,10 @@ function sshSession(database: MuxusDatabase) {
     stream,
     transport: 'new',
     summary: {},
-  });
+  };
+  const connectShell = vi.fn((..._args: unknown[]) =>
+    options.connectShell ? options.connectShell(shell) : Promise.resolve(shell),
+  );
   const app = {
     get: (_path: string, _options: unknown, handler: (socket: TestSocket) => void) => {
       route = handler;
@@ -70,7 +80,7 @@ function sshSession(database: MuxusDatabase) {
     forwards: { startConfig: vi.fn(), stop: vi.fn(), stopSessionForConnection: vi.fn() },
     database,
     history: { append: vi.fn() },
-    vault: { secrets: () => [] },
+    vault: options.vault ?? { secrets: () => [] },
     terminalInputs: new TerminalInputs(),
   };
   registerTerminalSocket(app as never, ctx as never);
@@ -88,7 +98,7 @@ function sshSession(database: MuxusDatabase) {
     socket.send.mock.calls
       .filter(([frame]) => typeof frame === 'string')
       .map(([frame]) => JSON.parse(String(frame)) as { op: string; state?: string; step?: number });
-  return { socket, stream, frames };
+  return { socket, stream, frames, connectShell };
 }
 
 describe('login sequences on SSH sessions', () => {
@@ -117,6 +127,54 @@ describe('login sequences on SSH sessions', () => {
       stream.emit('data', Buffer.from('router>'));
       await new Promise((resolve) => setImmediate(resolve));
       expect(stream.write.mock.calls.map(([data]) => String(data))).toEqual(['enable\r', 'show run\r']);
+      socket.close(1000, TERMINAL_SESSION_CLOSE_REASON);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('reads the sequence’s password-manager secret while the connection is made', async () => {
+    const database = new MuxusDatabase(':memory:');
+    try {
+      const folder = database.upsertFolderSettings('Core', {});
+      database.setFolderLoginSequence(folder.id, {
+        steps: [
+          { id: '1', kind: 'wait', pattern: '>', timeoutSeconds: 5 },
+          { id: '2', kind: 'send', text: 'enable', enter: true },
+          { id: '3', kind: 'secret', secretId: 'enable-secret', enter: true },
+        ],
+      });
+      database.updateOpenSshMetadata('router', { group: 'Core' });
+      const order: string[] = [];
+      let connected!: () => void;
+      const vault = {
+        secrets: () => [{ id: 'enable-secret', name: 'Enable' }],
+        externalSecret: (id: string) =>
+          id === 'enable-secret' ? { name: 'Enable', provider: 'fakevault', providerLabel: 'FakeVault' } : undefined,
+        secretValue: vi.fn(() => {
+          order.push('read');
+          return Promise.resolve('enable-Secret-4711');
+        }),
+      };
+      const { socket, stream, frames, connectShell } = sshSession(database, {
+        vault,
+        connectShell: (shell) => {
+          order.push('connect');
+          return new Promise((resolve) => (connected = () => resolve(shell)));
+        },
+      });
+
+      // Connecting starts first, so each hop's password is read ahead of the sequence's.
+      await vi.waitFor(() => expect(order).toEqual(['connect', 'read']));
+      expect(connectShell.mock.calls[0]?.[1]).toHaveProperty('earlySecrets');
+      connected();
+      await vi.waitFor(() => expect(frames().some((frame) => frame.op === 'ready')).toBe(true));
+      stream.emit('data', Buffer.from('router>'));
+      await vi.waitFor(() =>
+        expect(frames().filter((frame) => frame.op === 'login-sequence').at(-1)).toMatchObject({ state: 'done' }),
+      );
+      expect(stream.write.mock.calls.map(([data]) => String(data))).toEqual(['enable\r', 'enable-Secret-4711\r']);
+      expect(vault.secretValue).toHaveBeenCalledTimes(1);
       socket.close(1000, TERMINAL_SESSION_CLOSE_REASON);
     } finally {
       database.close();

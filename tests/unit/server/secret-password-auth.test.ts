@@ -9,6 +9,7 @@ import type { AuthPromptInfo, SshProfile } from '@muxus/shared/ws-protocol';
 import { MuxusDatabase } from '../../../server/src/persistence/database.js';
 import { SecretProviderError } from '../../../server/src/secret-providers/provider.js';
 import { SecretProviders } from '../../../server/src/secret-providers/registry.js';
+import { EarlySecretReads } from '../../../server/src/security/early-secret-reads.js';
 import {
   PasswordVault,
   folderPasswordAccount,
@@ -391,6 +392,98 @@ describe('logging in with a named secret', () => {
     await connect(manager, io, { kind: 'ssh', target: `tester@127.0.0.1:${port}`, useConfig: false, profileId: saved.id });
 
     expect(io.prompts).toBe(0);
+    expect(attempts).toEqual([true]);
+  });
+});
+
+describe('reading the login password early', () => {
+  it('starts the read as the connection starts and logs in with it, and reads nothing for a shared connection', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const provider = new FakeSecretProvider({ [LOCATOR]: PASSWORD });
+    const { manager, vault, database } = await setup(port, provider, { vault: false });
+    const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'core-sw1 login', locator: LOCATOR });
+    database.updateOpenSshMetadata('lab', { passwordSecretId: secret.id });
+
+    const io = makeIo();
+    io.earlySecrets = new EarlySecretReads(vault);
+    const lease = await (async () => {
+      const connecting = manager.connect(profile, io);
+      // Under way before the SSH handshake could have reached the password.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(provider.reads).toHaveLength(1);
+      expect(io.statuses.some((status) => status.startsWith('Asking FakeVault'))).toBe(false);
+      return connecting;
+    })();
+
+    expect(io.prompts).toBe(0);
+    expect(attempts).toEqual([true]);
+    expect(provider.reads).toHaveLength(1);
+    expect(io.statuses).toContain(`Using “core-sw1 login” from FakeVault for tester@127.0.0.1:${port}.`);
+
+    const second = makeIo();
+    second.earlySecrets = new EarlySecretReads(vault);
+    await connect(manager, second);
+    expect(provider.reads).toHaveLength(1);
+    lease.release();
+  });
+
+  it('asks in the session’s prompt when the password manager wanted to ask during the early read', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const provider = new FakeSecretProvider({ [LOCATOR]: PASSWORD });
+    provider.passphrase = 'open sesame';
+    const { manager, vault, database } = await setup(port, provider, { vault: false });
+    const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'TACACS', locator: LOCATOR });
+    database.upsertFolderSettings('Lab', { passwordSecretId: secret.id });
+
+    const io = makeIo((prompt) => (prompt === 'Passphrase' ? 'open sesame' : PASSWORD));
+    io.earlySecrets = new EarlySecretReads(vault);
+    await connect(manager, io);
+
+    expect(io.asked).toEqual([
+      { host: 'lab', name: 'Unlock FakeVault', prompts: [{ prompt: 'Passphrase', echo: false }] },
+    ]);
+    expect(provider.reads).toHaveLength(2);
+    expect(attempts).toEqual([true]);
+  });
+
+  it('takes a failed early read as the secret’s failure and moves on to the next password', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const failure = new SecretProviderError('denied', 'FakeVault did not allow access.');
+    const provider = new FakeSecretProvider({}, { failure });
+    const { manager, vault, database } = await setup(port, provider);
+    const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'core-sw1 login', locator: LOCATOR });
+    database.updateOpenSshMetadata('lab', { passwordSecretId: secret.id });
+    const row = database.upsertFolderSettings('Lab', {});
+    await vault.rememberSshPassword(folderPasswordAccount(row.id), folderPasswordLabel(row.path), PASSWORD);
+
+    const io = makeIo();
+    io.earlySecrets = new EarlySecretReads(vault);
+    await connect(manager, io);
+
+    expect(provider.reads).toHaveLength(1);
+    expect(io.statuses).toContain('FakeVault could not provide “core-sw1 login”: FakeVault did not allow access.');
+    expect(io.prompts).toBe(0);
+    expect(attempts).toEqual([true]);
+  });
+
+  it('reads nothing early when the first password to try is not in a password manager', async () => {
+    const { server, port, attempts } = await startServer();
+    cleanups.push(() => server.close());
+    const provider = new FakeSecretProvider({ [LOCATOR]: 'not-it' });
+    const { manager, vault, database } = await setup(port, provider);
+    const hostRef = { user: 'tester', host: '127.0.0.1', port };
+    await vault.rememberSshPassword(sshPasswordAccount(hostRef), sshPasswordLabel(hostRef), PASSWORD);
+    const secret = vault.createExternalSecret({ provider: 'fakevault', name: 'TACACS', locator: LOCATOR });
+    database.upsertFolderSettings('Lab', { passwordSecretId: secret.id });
+
+    const io = makeIo();
+    io.earlySecrets = new EarlySecretReads(vault);
+    await connect(manager, io);
+
+    expect(provider.reads).toEqual([]);
     expect(attempts).toEqual([true]);
   });
 });
