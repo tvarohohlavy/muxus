@@ -34,6 +34,7 @@ import { registerProfileRoutes } from './routes/profiles.js';
 import { registerHostOrderRoutes } from './routes/host-order.js';
 import { registerSessionHistoryRoutes } from './routes/session-history.js';
 import { registerPasswordVaultRoutes } from './routes/password-vault.js';
+import { registerSecretProviderRoutes } from './routes/secret-providers.js';
 import { registerFolderRoutes } from './routes/folders.js';
 import { registerLogRoutes } from './routes/logs.js';
 import { registerLocalFileRoutes } from './routes/local-files.js';
@@ -46,6 +47,11 @@ import {
   SessionHistoryStore,
 } from './session-logging/history-store.js';
 import { PasswordVault } from './security/password-vault.js';
+import {
+  defaultSecretProviders,
+  SecretProviders,
+  type SecretProvider,
+} from './secret-providers/index.js';
 
 export interface AppContext {
   config: ServerConfig;
@@ -54,6 +60,8 @@ export interface AppContext {
   database: MuxusDatabase;
   history: SessionHistoryStore;
   vault: PasswordVault;
+  /** Password managers that hold named secrets' values. */
+  secretProviders: SecretProviders;
   x11: LocalX11;
   /** Live terminal sessions the backend can type into (vault secrets). */
   terminalInputs: TerminalInputs;
@@ -99,11 +107,21 @@ function buildLogger(config: ServerConfig): FastifyBaseLogger {
   ) as FastifyBaseLogger;
 }
 
-export async function buildApp(config: ServerConfig): Promise<{ app: FastifyInstance; ctx: AppContext }> {
+export async function buildApp(
+  config: ServerConfig,
+  options: {
+    /** Replaces the providers this build offers; tests pass fakes. */
+    secretProviders?: readonly SecretProvider[];
+  } = {},
+): Promise<{ app: FastifyInstance; ctx: AppContext }> {
   const app = Fastify({ loggerInstance: buildLogger(config) });
 
   const database = new MuxusDatabase(config.databasePath);
-  const vault = new PasswordVault(database);
+  const secretProviders = new SecretProviders(
+    database,
+    options.secretProviders ?? defaultSecretProviders(),
+  );
+  const vault = new PasswordVault(database, { providers: secretProviders });
   await vault.initialize();
   const x11 = new LocalX11({ log: app.log, bundledServerDirectory: config.x11ServerDirectory });
   const connections = new SshConnectionManager(app.log, {
@@ -115,6 +133,7 @@ export async function buildApp(config: ServerConfig): Promise<{ app: FastifyInst
     },
     folderAuth: folderAuthResolver(database),
     profileFolderAuth: savedProfileFolderAuthResolver(database),
+    hostPasswordSecret: (host) => database.hostPasswordSecretId(host),
     disableSftpForHost: (alias) => database.sftpDisabledForAlias(alias),
     consoleCompatibilityForHost: (alias) => database.consoleCompatibilityForAlias(alias),
     disableSftpForProfile: (id) => database.sftpDisabledForSavedHost(id),
@@ -145,6 +164,7 @@ export async function buildApp(config: ServerConfig): Promise<{ app: FastifyInst
     database,
     history,
     vault,
+    secretProviders,
     x11,
     terminalInputs: new TerminalInputs(),
   };
@@ -215,6 +235,7 @@ export async function buildApp(config: ServerConfig): Promise<{ app: FastifyInst
   registerHostOrderRoutes(app, ctx);
   registerSessionHistoryRoutes(app, ctx);
   registerPasswordVaultRoutes(app, ctx);
+  registerSecretProviderRoutes(app, ctx);
   registerFolderRoutes(app, ctx);
   registerLogRoutes(app);
   registerLocalFileRoutes(app);

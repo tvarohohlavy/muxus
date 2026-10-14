@@ -83,6 +83,8 @@ import {
   sshPasswordLabel,
 } from '../security/password-vault.js';
 import { VaultKeyStoreUnavailableError } from '../security/vault-key-store.js';
+import type { EarlySecretReads } from '../security/early-secret-reads.js';
+import { SecretProviderError, type SecretProviderProblem } from '../secret-providers/provider.js';
 import {
   expandIdentityPath,
   isConcreteAlias,
@@ -109,6 +111,10 @@ export interface HostKeyChallenge {
 
 /** Interactive hooks a connection attempt needs from the UI. */
 export interface ConnectIo {
+  /** Aborted when the session that asked goes away; a provider read stops waiting. */
+  signal?: AbortSignal;
+  /** The session's password-manager reads started ahead of time; a login takes its value there. */
+  earlySecrets?: EarlySecretReads;
   status(message: string, options?: { transient?: boolean }): void;
   /** Ask the user to answer auth prompts (password, 2FA, key passphrase). */
   prompt(info: AuthPromptInfo): Promise<AuthPromptResponse>;
@@ -320,6 +326,8 @@ export interface ChainHop {
   hopLabel?: string;
   /** Folder passwords in the vault this hop may fall back to, nearest first. */
   folderPasswords?: readonly FolderPasswordRef[];
+  /** The named secret this host logs in with, tried before any saved password. */
+  passwordSecretId?: string;
   /** Target only: the host key an ssh:// link pinned, in canonical form. */
   hostKeyFingerprint?: string;
 }
@@ -350,11 +358,14 @@ export class SshConnectionManager {
   >();
   /** Dial plans whose optional integration setup killed the remote transport; reset on app restart. */
   private readonly automaticPlainShellKeys = new Set<string>();
+  /** Hosts (as user@host:port) whose last login needed no password; reset on app restart. */
+  private readonly loggedInWithoutPassword = new Set<string>();
   private readonly loadConfig: () => ConfigDocument;
   private readonly vault: PasswordVault | undefined;
   private readonly savedSshProfile: ((id: string) => SshProfile | undefined) | undefined;
   private readonly folderAuth: FolderAuthLookup | undefined;
   private readonly profileFolderAuth: FolderAuthLookup | undefined;
+  private readonly hostPasswordSecret: HostPasswordSecretLookup | undefined;
   private readonly disableSftpForHost: ((alias: string) => boolean) | undefined;
   private readonly consoleCompatibilityForHost: ((alias: string) => boolean) | undefined;
   private readonly disableSftpForProfile: ((id: string) => boolean) | undefined;
@@ -376,6 +387,8 @@ export class SshConnectionManager {
       folderAuth?: FolderAuthLookup;
       /** Folder defaults for Muxus-owned profiles, keyed by stable profile ID. */
       profileFolderAuth?: FolderAuthLookup;
+      /** The named secret a host logs in with (Muxus metadata, never ssh_config). */
+      hostPasswordSecret?: HostPasswordSecretLookup;
       /** Muxus-owned per-host compatibility setting; never written to ssh_config. */
       disableSftpForHost?: (alias: string) => boolean;
       /** Muxus-owned console compatibility setting; never written to ssh_config. */
@@ -400,6 +413,7 @@ export class SshConnectionManager {
     this.savedSshProfile = options.savedSshProfile;
     this.folderAuth = options.folderAuth;
     this.profileFolderAuth = options.profileFolderAuth;
+    this.hostPasswordSecret = options.hostPasswordSecret;
     this.disableSftpForHost = options.disableSftpForHost;
     this.consoleCompatibilityForHost = options.consoleCompatibilityForHost;
     this.disableSftpForProfile = options.disableSftpForProfile;
@@ -472,6 +486,7 @@ export class SshConnectionManager {
       this.folderAuth,
       this.profileFolderAuth,
       this.savedSshProfile,
+      this.hostPasswordSecret,
     );
     const target = chain[chain.length - 1]!;
     const metadataAlias =
@@ -585,6 +600,7 @@ export class SshConnectionManager {
       this.folderAuth,
       this.profileFolderAuth,
       this.savedSshProfile,
+      this.hostPasswordSecret,
     );
   }
 
@@ -852,6 +868,21 @@ export class SshConnectionManager {
     }
     const reused = route;
     reused?.retain();
+    if (reuseJumpHops && this.vault && io.earlySecrets) {
+      // Each hop's password from a password manager is read while the hops
+      // connect, rather than once the server asks for it. A host whose last
+      // login needed no password (a key did) will most likely do so again.
+      const vault = this.vault;
+      io.earlySecrets.start(
+        chain
+          .slice(first)
+          .flatMap((hop) =>
+            this.loggedInWithoutPassword.has(hopPasswordAccount(hop))
+              ? []
+              : (firstManagerPassword(hop, vault) ?? []),
+          ),
+      );
+    }
     const postAuth: Promise<void>[] = [];
     let dialed: Client | undefined;
     try {
@@ -1249,12 +1280,16 @@ export class SshConnectionManager {
         if (settled) return;
         ready = true;
         settled = true;
+        const authMethods = auth.acceptedMethods();
+        const account = hopPasswordAccount(hop);
+        if (auth.neededPassword) this.loggedInWithoutPassword.delete(account);
+        else this.loggedInWithoutPassword.add(account);
         this.handshakes.set(client, {
           // ssh2 keeps the software part of the server's identification
           // string privately; it publishes no accessor for it.
           serverSoftware: (client as Client & { _remoteVer?: string })._remoteVer,
           negotiated,
-          authMethods: auth.acceptedMethods(),
+          authMethods,
           authKeyAlgorithm: auth.acceptedKeyAlgorithm(),
           compressionRequested: hop.resolved.compression === true,
           agentForwarding: !hop.resolved.forwardAgent ? 'off' : agentSocket ? 'on' : 'no-agent',
@@ -1476,6 +1511,7 @@ export function buildChain(
   folderAuthFor?: FolderAuthLookup,
   profileFolderAuthFor?: FolderAuthLookup,
   savedProfileFor?: (id: string) => SshProfile | undefined,
+  hostPasswordSecretFor?: HostPasswordSecretLookup,
 ): ChainHop[] {
   const chain: ChainHop[] = [];
   const visited = new Set<string>();
@@ -1505,6 +1541,11 @@ export function buildChain(
       ? folderAuthFor?.(spec.host)
       : owner?.profileId
         ? profileFolderAuthFor?.(owner.profileId)
+        : undefined;
+    const passwordSecretId = fromConfig
+      ? hostPasswordSecretFor?.({ alias: spec.host })
+      : owner?.profileId
+        ? hostPasswordSecretFor?.({ profileId: owner.profileId })
         : undefined;
     const configuredBase = fromConfig
       ? resolveHost(doc, spec.host, folder?.optionLines)
@@ -1540,6 +1581,7 @@ export function buildChain(
       port: owner?.port ?? spec.port ?? resolved.port,
       hopLabel: final ? undefined : spec.host,
       folderPasswords: folder?.passwords,
+      ...(passwordSecretId ? { passwordSecretId } : {}),
       ...(final && profile.hostKeyFingerprint
         ? { hostKeyFingerprint: profile.hostKeyFingerprint }
         : {}),
@@ -1757,6 +1799,43 @@ interface PasswordCredential {
   existing: boolean;
 }
 
+function hopPasswordAccount(hop: ChainHop): string {
+  return sshPasswordAccount({ user: hop.user, host: hop.resolved.hostname, port: hop.port });
+}
+
+function passwordCredential(hop: ChainHop, vault: PasswordVault | undefined): PasswordCredential {
+  const account = hopPasswordAccount(hop);
+  return {
+    account,
+    label: sshPasswordLabel({ user: hop.user, host: hop.resolved.hostname, port: hop.port }),
+    existing: vault?.hasSshPassword(account) ?? false,
+  };
+}
+
+/**
+ * The saved passwords and named secrets a hop logs in with before asking,
+ * in order. The host's own named secret wins, then its saved password;
+ * folder passwords are the shared default the host falls back to, nearest
+ * folder first, each folder's secret before its saved password.
+ */
+function passwordSources(hop: ChainHop, credential: PasswordCredential): FolderPasswordRef[] {
+  return [
+    ...(hop.passwordSecretId ? [{ secretId: hop.passwordSecretId, label: credential.label }] : []),
+    ...(credential.existing ? [{ account: credential.account, label: credential.label }] : []),
+    ...(hop.folderPasswords ?? []),
+  ];
+}
+
+/** The secret a hop's login tries first, when a password manager holds it. */
+function firstManagerPassword(hop: ChainHop, vault: PasswordVault): string | undefined {
+  const { passwordAuthentication, kbdInteractiveAuthentication } = hop.resolved;
+  if (passwordAuthentication === false && kbdInteractiveAuthentication === false) return undefined;
+  const first = passwordSources(hop, passwordCredential(hop, vault)).find((source) =>
+    'secretId' in source ? vault.hasSecret(source.secretId) : vault.hasSshPassword(source.account),
+  );
+  return first && 'secretId' in first && vault.externalSecret(first.secretId) ? first.secretId : undefined;
+}
+
 /**
  * Keyboard-interactive is also used for OTPs and arbitrary challenges. Only
  * treat an unambiguous, single hidden password field as an SSH password.
@@ -1771,6 +1850,19 @@ function isKeyboardInteractivePasswordPrompt(prompts: readonly Prompt[]): boolea
 }
 
 type InteractionRunner = <T>(interaction: () => Promise<T>) => Promise<T>;
+
+/** Problems that fail every secret a password manager holds, not just the one asked for. */
+const PROVIDER_WIDE_PROBLEMS: ReadonlySet<SecretProviderProblem> = new Set<SecretProviderProblem>([
+  'not-installed',
+  'locked',
+  'unreachable',
+  'timeout',
+]);
+
+/** The named secret an SSH host logs in with: an OpenSSH alias's, or a Muxus-owned host's. */
+export type HostPasswordSecretLookup = (
+  host: { alias: string } | { profileId: string },
+) => string | undefined;
 
 type LoadedCertificate =
   | { file: string; certificate: OpenSshCertificate }
@@ -1851,6 +1943,10 @@ class AuthLadder {
   private lastPasswordCandidate: RememberedPasswordCandidate | undefined;
   private partialPasswordCandidate: RememberedPasswordCandidate | undefined;
   private savedPasswordAttempted = false;
+  /** The named secret tried last as this hop's password; unset when a saved password was. */
+  private triedSecretName: string | undefined;
+  /** The server asked for the password, as a password or as a keyboard-interactive password prompt. */
+  neededPassword = false;
   private retryKeyboardInteractive = false;
   /** The method last offered to the server, and those it partially accepted. */
   private lastMethod: AuthenticationType | undefined;
@@ -2141,9 +2237,10 @@ class AuthLadder {
     attempt: number,
     promptLabel: string,
   ): Promise<AnyAuthMethod> {
+    this.neededPassword = true;
     const { user } = this.hop;
     const credential = this.passwordCredential();
-    const saved = await this.availableSavedPassword(credential);
+    const saved = await this.availableSavedPassword(credential, promptLabel);
     if (saved !== undefined) {
       return { type: 'password', username: user, password: saved };
     }
@@ -2152,10 +2249,7 @@ class AuthLadder {
       this.io.prompt({
         host: promptLabel,
         purpose: 'ssh-password',
-        instructions:
-          this.savedPasswordAttempted
-            ? 'The saved password was unavailable or was not accepted. Enter the current password.'
-            : undefined,
+        instructions: this.retryInstructions(),
         prompts: [
           {
             prompt:
@@ -2216,18 +2310,16 @@ class AuthLadder {
     }
 
     this.retryKeyboardInteractive = true;
+    this.neededPassword = true;
     const credential = this.passwordCredential();
-    const saved = await this.availableSavedPassword(credential);
+    const saved = await this.availableSavedPassword(credential, promptLabel);
     if (saved !== undefined) return [saved];
 
-    const retryInstructions = this.savedPasswordAttempted
-      ? 'The saved password was unavailable or was not accepted. Enter the current password.'
-      : undefined;
     const response = await this.runInteraction(() =>
       this.io.prompt({
         name: name || undefined,
         instructions:
-          [retryInstructions, instructions || undefined]
+          [this.retryInstructions(), instructions || undefined]
             .filter((item): item is string => !!item)
             .join('\n\n') || undefined,
         host: promptLabel,
@@ -2247,38 +2339,136 @@ class AuthLadder {
     return response.answers;
   }
 
+  /** Why the user is asked after a saved password or a named secret was tried. */
+  private retryInstructions(): string | undefined {
+    if (!this.savedPasswordAttempted) return undefined;
+    return this.triedSecretName === undefined
+      ? 'The saved password was unavailable or was not accepted. Enter the current password.'
+      : `The password from “${this.triedSecretName}” was unavailable or was not accepted. Enter the current password.`;
+  }
+
   private passwordCredential(): PasswordCredential {
-    const { user, resolved, port } = this.hop;
-    const input = { user, host: resolved.hostname, port };
-    const account = sshPasswordAccount(input);
-    return {
-      account,
-      label: sshPasswordLabel(input),
-      existing: this.vault?.hasSshPassword(account) ?? false,
-    };
+    return passwordCredential(this.hop, this.vault);
   }
 
   private async availableSavedPassword(
     credential: PasswordCredential,
+    promptLabel: string,
   ): Promise<string | undefined> {
     if (this.savedPasswordAttempted || !this.vault) return undefined;
-    // The host's own saved password wins; folder passwords are the shared
-    // default the host falls back to, nearest folder first.
-    const source = credential.existing
-      ? { account: credential.account, label: credential.label }
-      : (this.hop.folderPasswords ?? []).find((folder) =>
-          this.vault!.hasSshPassword(folder.account),
-        );
-    if (!source) return undefined;
+    const vault = this.vault;
+    const sources = passwordSources(this.hop, credential);
+    // A host and its folder may name the same secret: one read, one approval.
+    // A manager that is missing, locked or not answering fails every secret
+    // it holds, so its later candidates are not asked again.
+    const tried = new Set<string>();
+    const failedProviders = new Set<string>();
+    for (const source of sources) {
+      if ('secretId' in source) {
+        // A secret deleted since it was chosen is no candidate.
+        if (tried.has(source.secretId) || !vault.hasSecret(source.secretId)) continue;
+        tried.add(source.secretId);
+        const provider = vault.externalSecret(source.secretId)?.provider;
+        if (provider !== undefined && failedProviders.has(provider)) continue;
+        this.savedPasswordAttempted = true;
+        const result = await this.secretPassword(source.secretId, source.label, promptLabel);
+        if (result.value !== undefined) return result.value;
+        if (result.problem === undefined) return undefined;
+        if (provider !== undefined && PROVIDER_WIDE_PROBLEMS.has(result.problem)) {
+          failedProviders.add(provider);
+        }
+        continue;
+      }
+      if (!vault.hasSshPassword(source.account)) continue;
+      this.savedPasswordAttempted = true;
+      this.triedSecretName = undefined;
+      const saved = await this.savedPassword(source.account, source.label);
+      if (saved !== undefined) {
+        this.io.status(`Using the saved password for ${source.label}.`, {
+          transient: true,
+        });
+      }
+      return saved;
+    }
+    return undefined;
+  }
 
-    this.savedPasswordAttempted = true;
-    const saved = await this.savedPassword(source.account, source.label);
-    if (saved !== undefined) {
-      this.io.status(`Using the saved password for ${source.label}.`, {
+  /**
+   * A named secret's value as this hop's password. A vault secret follows
+   * the vault's prompt policy like a saved password. A password manager may
+   * wait for the user to approve Muxus; when it cannot provide the value,
+   * the reason is shown and answered with the problem kind, so the next
+   * candidate, or the password prompt, takes over. A read cut short because
+   * the session went away ends the ladder, like a dismissed prompt.
+   */
+  private async secretPassword(
+    secretId: string,
+    label: string,
+    promptLabel: string,
+  ): Promise<{ value?: string; problem?: SecretProviderProblem }> {
+    const vault = this.vault!;
+    const external = vault.externalSecret(secretId);
+    if (external) {
+      const { name, providerLabel } = external;
+      this.triedSecretName = name;
+      this.io.status(`Asking ${providerLabel} for “${name}” to log in to ${label} …`, {
         transient: true,
       });
+      const readNow = () =>
+        vault.secretValue(secretId, undefined, {
+          signal: this.io.signal,
+          ask: (prompt) => this.io.prompt({ host: promptLabel, ...prompt }),
+        });
+      try {
+        // Approving in the password manager is the user's time, like a prompt.
+        const value = await this.runInteraction(() =>
+          this.io.earlySecrets
+            ? this.io.earlySecrets.read(secretId, readNow, this.io.signal)
+            : readNow(),
+        );
+        if (value !== undefined) {
+          this.io.status(`Using “${name}” from ${providerLabel} for ${label}.`, { transient: true });
+        }
+        return { value };
+      } catch (err) {
+        if (!(err instanceof SecretProviderError)) throw err;
+        if (err.problem === 'cancelled') throw new Error('authentication cancelled');
+        this.io.status(`${providerLabel} could not provide “${name}”: ${err.message}`);
+        return { problem: err.problem };
+      }
     }
-    return saved;
+    const name = vault.secrets().find((secret) => secret.id === secretId)?.name ?? 'the saved secret';
+    this.triedSecretName = name;
+    try {
+      let value: string | undefined;
+      if (!vault.status().locked) {
+        value = await vault.secretValue(secretId);
+      } else {
+        const result = await this.promptForVaultOperation(
+          'Unlock password vault',
+          `Enter the master password to use “${name}” for ${label}.`,
+          'Use another password',
+          (masterPassword) => vault.secretValue(secretId, masterPassword),
+        );
+        value = result.ok ? result.value : undefined;
+      }
+      if (value !== undefined) {
+        this.io.status(`Using “${name}” for ${label}.`, { transient: true });
+      }
+      return { value };
+    } catch (err) {
+      if (err instanceof CredentialVaultCorruptError) {
+        this.io.status(`“${name}” could not be decrypted. Enter the current password for ${label}.`);
+        return {};
+      }
+      if (err instanceof VaultKeyStoreUnavailableError) {
+        this.io.status(
+          `The OS credential store is unavailable. Enter the current password for ${label}.`,
+        );
+        return {};
+      }
+      throw err;
+    }
   }
 
   private capturePasswordCandidate(

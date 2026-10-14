@@ -31,6 +31,8 @@ const authSchema = z.object({
   identitiesOnly: z.boolean().optional(),
   identityAgent: z.string().max(1024).optional(),
   forwardAgent: z.boolean().optional(),
+  // The ID of a named secret; never the password itself.
+  passwordSecretId: z.string().max(200).optional(),
 });
 
 // A missing loginSequence keeps the folder's current one; null clears it.
@@ -200,5 +202,7 @@ function cleanAuth(auth: FolderAuthSettings): FolderAuthSettings {
   const identityAgent = auth.identityAgent?.trim();
   if (identityAgent) out.identityAgent = identityAgent;
   if (auth.forwardAgent !== undefined) out.forwardAgent = auth.forwardAgent;
+  const passwordSecretId = auth.passwordSecretId?.trim();
+  if (passwordSecretId) out.passwordSecretId = passwordSecretId;
   return out;
 }

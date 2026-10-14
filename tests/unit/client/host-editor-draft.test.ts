@@ -318,4 +318,32 @@ describe('SSH host editor draft', () => {
       draftProblem({ ...fromConfig, loginSequence: { mode: 'custom', steps: [{ id: 'x', kind: 'secret', secretId: '', enter: true }] } }),
     ).toBe('Login sequence step 1: Choose a secret from the password vault.');
   });
+
+  it('loads the login password secret from either host source, and none by default', () => {
+    expect(blankDraft().passwordSecretId).toBe('');
+    expect(draftFromEntry(entry, false).passwordSecretId).toBe('');
+    expect(
+      draftFromEntry(
+        { ...entry, metadata: { profileId: 'p', connectCount: 0, passwordSecretId: 'vault-secret-1' } },
+        true,
+      ).passwordSecretId,
+    ).toBe('vault-secret-1');
+
+    const saved: SavedHostProfile = {
+      id: 'r',
+      kind: 'ssh',
+      name: 'Router',
+      profile: { kind: 'ssh', profileId: 'r', target: 'router.test', useConfig: false },
+      metadata: { profileId: 'r', connectCount: 0 },
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    expect(draftFromSavedSshProfile(saved, false).passwordSecretId).toBe('');
+    expect(
+      draftFromSavedSshProfile(
+        { ...saved, metadata: { ...saved.metadata, passwordSecretId: 'vault-secret-2' } },
+        false,
+      ).passwordSecretId,
+    ).toBe('vault-secret-2');
+  });
 });

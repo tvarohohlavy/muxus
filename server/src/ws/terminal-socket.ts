@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { nanoid } from 'nanoid';
-import type { ConfigForward, TerminalServerMessage } from '@muxus/shared';
+import type { ConfigForward, LoginSequence, TerminalServerMessage } from '@muxus/shared';
 import {
   DEFAULT_BREAK_DURATION_MS,
   TERMINAL_SESSION_CLOSE_REASON,
@@ -27,6 +27,7 @@ import {
 } from '../session-logging/session-recorder.js';
 import { resolveLoginSequence, type LoginSequenceHost } from '../login-sequence/resolve.js';
 import { LoginSequenceSession } from '../login-sequence/session.js';
+import { EarlySecretReads } from '../security/early-secret-reads.js';
 import { PastePacer } from './paste-pacer.js';
 
 const CONNECT_TIMEOUT_MS = 30_000;
@@ -384,10 +385,15 @@ async function handleSession(
       writeInput?.(input);
     }
   });
+  const connectAbort = new AbortController();
   socket.on('close', () => {
     socketOpen = false;
     control.close();
+    connectAbort.abort();
   });
+  // Password-manager reads this connect will need, started early so the
+  // manager's delay overlaps the connection; they end with the socket.
+  const earlySecrets = new EarlySecretReads(ctx.vault, { signal: connectAbort.signal });
 
   let connectTimer: NodeJS.Timeout | undefined;
   const connectMsg = await Promise.race([
@@ -407,6 +413,8 @@ async function handleSession(
   socket.on('close', () => clearInterval(keepalive));
 
   const io: ConnectIo = {
+    signal: connectAbort.signal,
+    earlySecrets,
     status: (message, options) => {
       recorder?.system(message);
       sendControl(socket, { op: 'status', message, transient: options?.transient });
@@ -434,6 +442,7 @@ async function handleSession(
     // leases the socket closes and the transport lives on with them.
     const profile = ctx.connections.resolveProfile(connectMsg.profile);
     const dialLease = await ctx.connections.connect(profile, io, 'dial');
+    earlySecrets.close();
     if (!socketOpen) {
       dialLease.release();
       return;
@@ -542,33 +551,45 @@ async function handleSession(
   sendLoggingState();
   socket.once('close', () => recorder?.end('disconnected'));
 
-  // A host's login sequence sees output from the moment the transport is
-  // attached. It belongs to this connect: a reconnect runs it again, a
-  // renderer reattaching to the live session does not.
-  const prepareLoginSequence = (
-    host: () => LoginSequenceHost | undefined,
-  ): LoginSequenceSession | undefined => {
-    const write = ctx.terminalInputs.writer(terminalId);
-    if (!write) return undefined;
+  // A host's login sequence is looked up before the transport connects, so
+  // the password-manager secrets it types are read while it connects.
+  const findLoginSequence = (host: () => LoginSequenceHost | undefined): LoginSequence | undefined => {
     try {
       const target = host();
-      const sequence = target && resolveLoginSequence(ctx.database, target);
-      if (!sequence) return undefined;
-      const session = new LoginSequenceSession({
-        sequence,
-        vault: ctx.vault,
-        write,
-        recorder: recorder!,
-        send: (message) => sendControl(socket, message),
-        log: app.log,
-      });
-      socket.once('close', () => session.close());
-      loginSequence = session;
-      return session;
+      return target && resolveLoginSequence(ctx.database, target);
     } catch (err) {
       app.log.warn({ err }, 'could not load the login sequence');
       return undefined;
     }
+  };
+  const readSequenceSecretsEarly = (sequence: LoginSequence | undefined) =>
+    earlySecrets.start(sequence?.steps.flatMap((step) => (step.kind === 'secret' ? [step.secretId] : [])) ?? []);
+  // A host's login sequence sees output from the moment the transport is
+  // attached. It belongs to this connect: a reconnect runs it again, a
+  // renderer reattaching to the live session does not.
+  const prepareLoginSequence = (sequence: LoginSequence | undefined): LoginSequenceSession | undefined => {
+    const write = ctx.terminalInputs.writer(terminalId);
+    if (sequence && write) {
+      try {
+        const session = new LoginSequenceSession({
+          sequence,
+          vault: ctx.vault,
+          write,
+          recorder: recorder!,
+          send: (message) => sendControl(socket, message),
+          log: app.log,
+          earlySecrets,
+        });
+        socket.once('close', () => session.close());
+        loginSequence = session;
+        return session;
+      } catch (err) {
+        app.log.warn({ err }, 'could not load the login sequence');
+      }
+    }
+    // With no sequence to run, nothing takes a value read early.
+    earlySecrets.close();
+    return undefined;
   };
 
   if (profile.kind === 'local') {
@@ -607,6 +628,8 @@ async function handleSession(
   }
 
   if (profile.kind === 'serial') {
+    const sequence = findLoginSequence(() => (profile.profileId ? { profileId: profile.profileId } : undefined));
+    readSequenceSecretsEarly(sequence);
     io.status(`Opening ${profile.path} at ${profile.baudRate} baud …`, {
       transient: true,
     });
@@ -615,6 +638,7 @@ async function handleSession(
       transport.close();
       return;
     }
+    earlySecrets.connected();
     attachTerminalTransport(
       socket,
       control,
@@ -625,7 +649,7 @@ async function handleSession(
       `serial-${nanoid(10)}`,
       recorder,
       handleLoggingControl,
-      prepareLoginSequence(() => (profile.profileId ? { profileId: profile.profileId } : undefined)),
+      prepareLoginSequence(sequence),
     );
     writePastedInput = drainedWriter(transport);
     app.log.info(
@@ -637,6 +661,8 @@ async function handleSession(
   }
 
   if (profile.kind === 'telnet') {
+    const sequence = findLoginSequence(() => (profile.profileId ? { profileId: profile.profileId } : undefined));
+    readSequenceSecretsEarly(sequence);
     io.status(`Connecting to ${profile.host}:${profile.port} over Telnet …`, {
       transient: true,
     });
@@ -645,6 +671,7 @@ async function handleSession(
       transport.close();
       return;
     }
+    earlySecrets.connected();
     attachTerminalTransport(
       socket,
       control,
@@ -655,7 +682,7 @@ async function handleSession(
       `telnet-${nanoid(10)}`,
       recorder,
       handleLoggingControl,
-      prepareLoginSequence(() => (profile.profileId ? { profileId: profile.profileId } : undefined)),
+      prepareLoginSequence(sequence),
     );
     writePastedInput = drainedWriter(transport);
     app.log.info({ host: profile.host, port: profile.port }, 'telnet session established');
@@ -664,7 +691,14 @@ async function handleSession(
   }
 
   // --- SSH ---
-  const { lease: terminalLease, stream, transport, summary } = await ctx.connections.connectShell(
+  const sshSequence = findLoginSequence(() => {
+    if (profile.profileId) return { profileId: profile.profileId };
+    const alias = ctx.connections.metadataAliasFor(profile);
+    return alias ? { alias } : undefined;
+  });
+  // Connecting starts reading each hop's password; the sequence's secrets
+  // follow them, in the order the session needs them.
+  const shell = ctx.connections.connectShell(
     profile,
     io,
     cols,
@@ -672,6 +706,9 @@ async function handleSession(
     DEFAULT_TERM,
     { freshTransport: connectMsg.freshTransport, cwd: connectMsg.cwd },
   );
+  readSequenceSecretsEarly(sshSequence);
+  const { lease: terminalLease, stream, transport, summary } = await shell;
+  earlySecrets.connected();
   const conn = terminalLease.connection;
   // Session forwards belong to the terminal sessions using this transport;
   // stop them when the last terminal/dial lease leaves. Saved/manual tunnels
@@ -745,11 +782,7 @@ async function handleSession(
       });
     }
   };
-  const sshLoginSequence = prepareLoginSequence(() => {
-    if (profile.profileId) return { profileId: profile.profileId };
-    const alias = ctx.connections.metadataAliasFor(profile);
-    return alias ? { alias } : undefined;
-  });
+  const sshLoginSequence = prepareLoginSequence(sshSequence);
 
   // Flow control: a runaway `cat hugefile` must not balloon the ws buffer.
   let paused = false;

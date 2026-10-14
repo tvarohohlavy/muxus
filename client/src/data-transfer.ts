@@ -661,6 +661,7 @@ function portableMetadata(
     disableSftp: metadata.disableSftp,
     consoleCompatibility: metadata.consoleCompatibility,
     loginSequence: metadata.loginSequence,
+    passwordSecretId: metadata.passwordSecretId,
     sortOrder: metadata.sortOrder,
   };
 }
@@ -826,6 +827,11 @@ function metadataPatch(metadata: PortableHostMetadata): OpenSshMetadataPatch {
     disableSftp: metadata.disableSftp ?? false,
     consoleCompatibility: metadata.consoleCompatibility ?? false,
     loginSequence: isLoginSequence(metadata.loginSequence) ? metadata.loginSequence : null,
+    // Only the ID travels; on another machine the secret is missing until chosen again.
+    passwordSecretId:
+      typeof metadata.passwordSecretId === 'string' && metadata.passwordSecretId
+        ? metadata.passwordSecretId
+        : null,
   };
 }
 

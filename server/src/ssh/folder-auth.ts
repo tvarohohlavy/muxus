@@ -3,17 +3,19 @@ import { folderChain } from '../util/folder-paths.js';
 import { folderPasswordAccount, folderPasswordLabel } from '../security/password-vault.js';
 import type { OptionLine } from './ssh-config.js';
 
-/** A folder password candidate in the encrypted vault. */
-export interface FolderPasswordRef {
-  account: string;
-  label: string;
-}
+/**
+ * A folder password candidate: the folder's saved password in the encrypted
+ * vault, or the named secret it logs in with.
+ */
+export type FolderPasswordRef =
+  | { account: string; label: string }
+  | { secretId: string; label: string };
 
 /** Folder-inherited connection defaults for one dial target. */
 export interface FolderAuthDefaults {
   /** Lowest-priority ssh_config option lines; see resolveHost's `fallback`. */
   optionLines: OptionLine[];
-  /** Vault password candidates, nearest folder first. */
+  /** Password candidates, nearest folder first; a folder's secret before its saved password. */
   passwords: FolderPasswordRef[];
 }
 
@@ -73,10 +75,13 @@ function folderAuthForGroup(
   if (rows.length === 0) return undefined;
   return {
     optionLines: folderAuthOptionLines(mergeFolderAuth(rows.map((row) => row.auth))),
-    passwords: rows.map((row) => ({
-      account: folderPasswordAccount(row.id),
-      label: folderPasswordLabel(row.path),
-    })),
+    passwords: rows.flatMap((row): FolderPasswordRef[] => {
+      const label = folderPasswordLabel(row.path);
+      const saved = { account: folderPasswordAccount(row.id), label };
+      return row.auth.passwordSecretId
+        ? [{ secretId: row.auth.passwordSecretId, label }, saved]
+        : [saved];
+    }),
   };
 }
 

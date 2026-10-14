@@ -109,6 +109,30 @@ sudo usermod -aG dialout "$USER"   # or uucp, depending on the distribution
 
 Log out and back in afterwards.
 
+## Adding a secret provider
+
+A secret provider lets named secrets stay in a password manager. Providers live in
+`server/src/secret-providers/` and implement `SecretProvider` from `provider.ts`:
+
+- `descriptor` names the provider and describes its fields: the **locator** that says where
+  a value is kept, optional per-secret **options** (such as an account) and optional
+  **settings** for the provider as a whole (such as where its CLI is). The client draws the
+  Settings group and the secret dialog from this alone.
+- `locatorProblem`, and optionally `optionProblem` and `settingProblem`, say in words for
+  the user why a value cannot be used. Muxus calls them before saving and before every read.
+- `status` says whether the provider can be used now, for Settings.
+- `read` returns the value or rejects with a `SecretProviderError` whose message is shown to
+  the user. It gets the saved settings, an abort signal, and `ask` for a question the user
+  can answer in the session. A session reads its login secrets as it opens, before anyone
+  can answer: such a read's `ask` answers as skipped, and Muxus reads again when the value
+  is needed.
+
+`cli.ts` has helpers for providers that run a command-line tool: finding it on `PATH` and in
+known folders, running it without a shell, and sorting out its failures. Register the
+provider in `defaultSecretProviders()` in `index.ts`. Field keys are stored, so they must not
+look like a secret (`password`, `token` and similar are refused). Tests can pass their own
+providers to `buildApp`, as `tests/unit/server/fake-secret-provider.ts` does.
+
 ## Documentation and screenshots
 
 The site is built with [Zensical](https://zensical.org) through two scripts. They use

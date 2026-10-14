@@ -155,8 +155,15 @@ therefore fills gaps without replacing a value configured directly on the host.
 
 The shared password is kept in the encrypted [password vault](settings.md) and is tried
 automatically when a host falls back to password login; a password remembered for the
-host itself still wins. Folder credentials move with the folder when it is renamed or
-dragged, and deleting the folder deletes them.
+host itself still wins. **Password from a secret** picks a
+[named secret](settings.md#passwords) instead. It is tried before the folder's shared
+password, and a host's own [login password](adding-hosts.md#authentication) still comes
+first. When the folder's secret is the first password a host would try and a password
+manager holds it, it is read as the tab opens, even if a key then logs in; while the host's
+last login since Muxus started needed no password, it is read only when the server asks for
+one.
+Folder credentials move with the folder when it is renamed or dragged, and deleting the
+folder deletes them.
 
 ### Shared login sequence
 

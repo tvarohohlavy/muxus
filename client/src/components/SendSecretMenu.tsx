@@ -130,9 +130,7 @@ export function SendSecretMenu() {
         </Typography>
       </ListSubheader>
       {empty ? (
-        <MenuItem disabled>
-          {vault?.configured === false ? 'No password vault yet' : 'No secrets saved yet'}
-        </MenuItem>
+        <MenuItem disabled>No secrets yet. Add one under Settings → Passwords.</MenuItem>
       ) : null}
       {!empty && filtered.length === 0 && !isLoading ? (
         <MenuItem disabled>No matching secrets</MenuItem>
@@ -150,9 +148,9 @@ export function SendSecretMenu() {
           <Typography variant="body2" noWrap sx={{ maxWidth: 260 }}>
             {secret.name}
           </Typography>
-          {secret.username ? (
+          {secret.username || secret.external ? (
             <Box component="span" sx={{ ml: 'auto', pl: 1.5, color: 'text.secondary', fontSize: 12 }}>
-              {secret.username}
+              {[secret.username, secret.external?.providerLabel].filter(Boolean).join(' · ')}
             </Box>
           ) : null}
         </MenuItem>

@@ -130,6 +130,55 @@ Patterns are matched in the backend against a bounded window of output, and a re
 expression is abandoned after a short time limit, so a pathological pattern cannot stall
 other sessions.
 
+### Secrets from password managers
+
+A named secret can stay in a password manager that Muxus supports (a secret provider).
+Muxus stores its name, optional user name, the provider's ID and a locator that says where
+the manager keeps the value, plus optional per-secret options such as an account. It never
+stores the value. These rows live outside the vault: resetting the vault keeps them, and
+they are not part of a backup. Locators, options and provider settings are checked by the
+provider before they are saved or used, may not contain control characters, and pass the
+same secret-free check as everything else in the database.
+
+At each use the backend asks the provider for the value and types it straight into the
+session, exactly like a vault secret. The manager may ask the user to approve; reads for one
+provider run one at a time, so several sessions opening together do not all ask at once. A
+provider may also ask the user a question, such as a passphrase, in the session's own
+prompt; the answer is not saved.
+
+A manager can take a second or more to answer, so when a terminal session opens, the backend
+starts reading the secrets its login will need: the first password each SSH hop it dials
+would try, when a password manager holds it, and the secrets the host's login sequence
+types. These reads run while the connection is made, each serves one use, and a value read
+early stays only in the backend's memory. It is dropped once used, when the login sequence
+ends (or, without one, once the connection is up), when the tab closes, or when nobody took
+it within a minute of the connection being up or of the read finishing, whichever is later.
+A session reads one secret at a time from each manager, so when several tabs open together,
+every tab's first secret from a manager (usually its login password) is read before any
+tab's second.
+
+The manager's approval prompt therefore appears as the tab opens, and a read is wasted when
+a key logs in or the sequence stops before its step. While a host's last login since Muxus
+started needed no password (a key was enough), its password is read only when the server
+asks for one. A value read early is not used, and the secret is read again when needed, when the
+provider wanted to ask the user something (so the question appears there), when the secret
+was deleted or pointed at another item since, or when the read failed because the manager
+was locked, not running or did not answer before anyone needed the value. Nothing is read
+early for **Send secret…** or command buttons, or from the vault.
+
+When a provider cannot give a value, nothing is typed: an SSH login moves on to the next
+saved password or the prompt, a login sequence asks the user to type the value for that
+step (typed into the session and not saved), and **Send secret…** reports why.
+
+### Login passwords from named secrets
+
+A host or folder can name a secret, from the vault or a password manager, to log in with.
+Only the secret's ID is stored, in the Muxus database and never in `ssh_config`. At login
+the order is: the host's secret, the host's saved password, then each folder from nearest
+to farthest, its secret before its saved password. A secret that was deleted is skipped.
+The ID travels in a backup like a command button's, so a host or folder restored on another
+machine refers to a secret that is not there until another is chosen.
+
 ## Host keys
 
 Verification uses `~/.ssh/known_hosts` and the read-only `/etc/ssh/ssh_known_hosts`, hashed

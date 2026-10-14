@@ -48,7 +48,12 @@ function quoted(text: string): string {
 }
 
 /** What a step does, as the tab shows it while the step runs. */
-export function describeLoginStep(step: LoginSequenceStep, secretName?: string): string {
+export function describeLoginStep(
+  step: LoginSequenceStep,
+  secretName?: string,
+  /** The password manager that holds the secret, when not the vault. */
+  providerLabel?: string,
+): string {
   switch (step.kind) {
     case 'wait':
       return step.regex ? `Waiting for a match of ${quoted(step.pattern)}` : `Waiting for ${quoted(step.pattern)}`;
@@ -56,6 +61,9 @@ export function describeLoginStep(step: LoginSequenceStep, secretName?: string):
       if (!step.text) return 'Pressing Enter';
       return `Typing ${quoted(step.text)}${step.enter ? ' and Enter' : ''}`;
     case 'secret':
+      if (providerLabel) {
+        return `Typing ${quoted(secretName ?? 'the secret')} from ${providerLabel}${step.enter ? ' and Enter' : ''}`;
+      }
       return `Typing the secret ${quoted(secretName ?? 'from the password vault')}${step.enter ? ' and Enter' : ''}`;
   }
 }
@@ -79,6 +87,8 @@ export class LoginSequenceRunner {
     private readonly io: LoginSequenceIo,
     private readonly options: {
       secretName?: (secretId: string) => string | undefined;
+      /** The password manager holding a secret, which may first ask the user to approve. */
+      secretProvider?: (secretId: string) => string | undefined;
       buffer?: LoginOutputBuffer;
     } = {},
   ) {
@@ -117,6 +127,7 @@ export class LoginSequenceRunner {
         detail = describeLoginStep(
           step,
           step.kind === 'secret' ? this.options.secretName?.(step.secretId) : undefined,
+          step.kind === 'secret' ? this.options.secretProvider?.(step.secretId) : undefined,
         );
         this.io.progress({ state: 'running', step: current, steps: total, detail });
         await this.runStep(step, current);

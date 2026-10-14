@@ -7,6 +7,7 @@ import {
   loginSequenceDraft,
   loginSequenceFromDraft,
   loginSequenceProblem,
+  hostsLoggingInWithSecret,
   loginSequencesUsingSecret,
   loginStepSummary,
   moveLoginStep,
@@ -160,6 +161,20 @@ describe('loginSequencesUsingSecret', () => {
           { label: 'Network', loginSequence: { steps: [{ ...secret, secretId: 'other' }] } },
           { label: 'web-01' },
           { label: 'Lab', loginSequence: { steps: [secret] } },
+        ],
+        'vault-1',
+      ),
+    ).toEqual(['core-sw1', 'Lab']);
+  });
+
+  it('names the hosts and folders that log in with the secret', () => {
+    expect(
+      hostsLoggingInWithSecret(
+        [
+          { label: 'core-sw1', passwordSecretId: 'vault-1' },
+          { label: 'Network', passwordSecretId: 'other' },
+          { label: 'web-01' },
+          { label: 'Lab', passwordSecretId: 'vault-1', loginSequence: { steps: [secret] } },
         ],
         'vault-1',
       ),

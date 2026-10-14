@@ -124,7 +124,10 @@ export function useDeleteFolderSettings() {
   });
 }
 
-/** Every host and folder that sets its own login sequence, for checks before a secret is deleted. */
+/**
+ * Every host and folder with its own login sequence or login password, for
+ * checks before a secret is deleted.
+ */
 export async function fetchLoginSequenceOwners(): Promise<LoginSequenceOwner[]> {
   const [config, saved, folders] = await Promise.all([
     apiFetch<SshConfigResponse>('/api/ssh/config'),
@@ -135,12 +138,18 @@ export async function fetchLoginSequenceOwners(): Promise<LoginSequenceOwner[]> 
     ...config.hosts.map((host) => ({
       label: host.metadata?.displayName ?? host.alias,
       loginSequence: host.metadata?.loginSequence,
+      passwordSecretId: host.metadata?.passwordSecretId,
     })),
     ...saved.profiles.map((profile) => ({
       label: profile.name,
       loginSequence: profile.metadata.loginSequence,
+      passwordSecretId: profile.metadata.passwordSecretId,
     })),
-    ...folders.folders.map((folder) => ({ label: folder.path, loginSequence: folder.loginSequence })),
+    ...folders.folders.map((folder) => ({
+      label: folder.path,
+      loginSequence: folder.loginSequence,
+      passwordSecretId: folder.auth.passwordSecretId,
+    })),
   ];
 }
 

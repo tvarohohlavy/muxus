@@ -95,5 +95,7 @@ export const metadataPatchSchema = z
     disableSftp: z.boolean().optional(),
     consoleCompatibility: z.boolean().optional(),
     loginSequence: loginSequenceSchema.nullable().optional(),
+    // The ID of a named secret; never the password itself.
+    passwordSecretId: z.string().min(1).max(200).nullable().optional(),
   })
   .refine((patch) => Object.keys(patch).length > 0, 'at least one metadata field is required');

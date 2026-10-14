@@ -230,13 +230,13 @@ the operating-system credential store.
   **Never for saved credentials** stores the vault key in the OS credential store,
   **When Muxus starts** unlocks it into memory once, and **Whenever a saved credential is
   needed** prompts for each use.
-- **Secrets** are passwords and PINs that are not a login, such as an `enable` or `sudo`
-  password; a user name is optional. **Add secret** saves one, and
-  [command buttons](commands.md#buttons-that-send-a-secret), **Send secret…** and
-  [login sequences](adding-hosts.md#login-sequence) type them into a session. Adding, viewing
-  and editing a secret take the master password; typing one follows the prompt policy.
-  Deleting a secret that command buttons or login sequences still use warns first and names
-  them.
+- **Secrets** are passwords and PINs to type into sessions, such as an `enable` or `sudo`
+  password; a user name is optional. **Add secret** saves one in the vault.
+  [Command buttons](commands.md#buttons-that-send-a-secret), **Send secret…** and
+  [login sequences](adding-hosts.md#login-sequence) type them into a session, and a host or
+  folder can [log in with one](adding-hosts.md#authentication). Adding, viewing and editing
+  a vault secret take the master password; typing one follows the prompt policy. Deleting a
+  secret that command buttons or login sequences still use warns first and names them.
 - **View or edit password** asks for the master password before revealing the saved value.
 - **Change master password** changes that management password without rewriting every
   credential.
@@ -256,7 +256,8 @@ stored in the application-data directory.
 **Create backup** writes the Muxus-side data to a file: folders, colours, saved
 Telnet/serial hosts, workspaces, tunnels, login sequences and preferences. **Restore a backup**
 merges a file back in; items absent from the file are not deleted. A login sequence's secret
-steps keep only which vault secret they type.
+steps keep only which secret they type, and so does a host's or folder's login password; on
+another machine they show as **Missing secret** until one is chosen again.
 
 **Export OpenSSH** writes the SSH hosts out as a standard `ssh_config` for use with another
 client. Non-secret shared folder defaults are copied into each affected host block so the

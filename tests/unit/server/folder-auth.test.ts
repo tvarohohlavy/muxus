@@ -241,6 +241,24 @@ describe('folderAuthResolver', () => {
     ]);
   });
 
+  it('offers a folder’s named secret before its saved password', () => {
+    const withSecret = folderAuthResolver({
+      groupForAlias: () => 'Prod/EU',
+      folderSettingsForPath: (path) =>
+        folderPathKey(path) === 'prod/eu'
+          ? { id: 'row-eu', path: 'Prod/EU', auth: { passwordSecretId: 'secret-1' } }
+          : settings.get(folderPathKey(path)),
+    });
+    const defaults = withSecret('web');
+    expect(defaults!.passwords).toEqual([
+      { secretId: 'secret-1', label: 'Folder Prod/EU' },
+      { account: folderPasswordAccount('row-eu'), label: 'Folder Prod/EU' },
+      { account: folderPasswordAccount('row-prod'), label: 'Folder Prod' },
+    ]);
+    // A secret is no ssh_config option.
+    expect(defaults!.optionLines.map((line) => line.key)).toEqual(['user', 'port']);
+  });
+
   it('returns nothing for hosts outside folders or folders without settings', () => {
     expect(resolver('bare')).toBeUndefined();
     const empty = folderAuthResolver({

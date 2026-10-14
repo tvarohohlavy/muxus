@@ -123,6 +123,17 @@ export interface PasswordVaultSecret {
   name: string;
   /** Optional account the secret belongs to; plain metadata, never sent. */
   username?: string;
+  /**
+   * Set when a secret provider (a password manager) holds the value: Muxus
+   * keeps only where the value lives and asks the provider each time.
+   */
+  external?: {
+    provider: string;
+    /** The provider's name, e.g. "1Password"; the ID when it is not installed. */
+    providerLabel: string;
+    locator: string;
+    options?: Record<string, string>;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -819,6 +830,8 @@ export interface OpenSshProfileMetadata {
   consoleCompatibility?: boolean;
   /** The host's own login sequence; absent inherits the folder's. */
   loginSequence?: LoginSequence;
+  /** Named secret tried as the SSH password before any saved one. */
+  passwordSecretId?: string;
   lastConnectedAt?: string;
   connectCount: number;
 }
@@ -839,6 +852,8 @@ export interface OpenSshMetadataPatch {
   consoleCompatibility?: boolean;
   /** Null goes back to the folder's sequence. */
   loginSequence?: LoginSequence | null;
+  /** Null stops using a named secret as the SSH password. */
+  passwordSecretId?: string | null;
 }
 
 /**
@@ -846,7 +861,8 @@ export interface OpenSshMetadataPatch {
  * field is optional: a folder only overrides what it sets. At connect time
  * these apply *below* everything in ssh_config — a host's own options and
  * `Host *` blocks always win — with the nearest folder beating its ancestors.
- * The folder password is not here; it lives in the encrypted vault.
+ * The folder password is not here; it lives in the encrypted vault, and a
+ * named secret appears only by ID.
  */
 export interface FolderAuthSettings {
   user?: string;
@@ -856,6 +872,8 @@ export interface FolderAuthSettings {
   /** Agent socket override: a path, `$VAR`/`${VAR}`, `SSH_AUTH_SOCK`, or `none`. */
   identityAgent?: string;
   forwardAgent?: boolean;
+  /** Named secret tried as the SSH password for hosts inside, before the saved folder password. */
+  passwordSecretId?: string;
 }
 
 /** One folder's stored credential defaults. */

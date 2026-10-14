@@ -268,6 +268,7 @@ function TunnelEditorForm({
                     draft={custom}
                     set={patchCustom}
                     keys={keys}
+                    loginPassword={false}
                   />
                 </ProfileAccordion>
                 <ProfileAccordion
